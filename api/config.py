@@ -11,6 +11,8 @@ S2S = os.getenv("CLEAR_S2S_URL") or "https://s2ssandbox.thomsonreuters.com/"
 
 ENDPOINTS = {
     "auth": f"{API}/tr-oauth/v1/token",
-    "business": f"{S2S}/v2/business/searchResults",
-    "person": f"{S2S}/v3/person/searchResults",
+    "business-search": f"{S2S}/v2/business/searchResults",
+    "person-search": f"{S2S}/v3/person/searchResults",
+    "business-report": f"{S2S}/v2/businessReport/reportResults",
+    "person-report": f"{S2S}/v3/personReport/reportResults",
 }

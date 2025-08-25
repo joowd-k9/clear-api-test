@@ -42,7 +42,7 @@ def read_root():
 
 
 @app.get("/search")
-def search_business():
+def search():
     """Search for a business."""
     business_data = {
         "reference": "S2S Business Search",

@@ -7,7 +7,6 @@ from fastapi import FastAPI, Response
 from api.config import ENDPOINTS
 from api.token import Token
 from api.builder import build_business_search_xml, build_business_report_xml
-from api.parser import parse_business_search_response
 
 load_dotenv()
 
@@ -94,53 +93,64 @@ def search_business():
             "response": search_response.text,
         }
 
-    search_response_root = ET.fromstring(search_response.text)
-
-    search_uri_element = search_response_root.find(".//Uri")
-
-    report_response = requests.get(
-        search_uri_element.text, headers=get_headers(content_type=None), timeout=30
+    search_results_response = requests.get(
+        ET.fromstring(search_response.text).find(".//Uri").text,
+        headers=get_headers(content_type=None),
+        timeout=30,
     )
 
-    report_response = parse_business_search_response(report_response.text)
+    if search_results_response.status_code != 200:
+        print(
+            "Search results request failed with status "
+            + str(search_results_response.status_code)
+            + ": "
+            + search_results_response.text
+        )
+
+        return {
+            "error": "Search results request failed with status "
+            + str(search_results_response.status_code)
+            + ": "
+            + search_results_response.text,
+            "response": search_results_response.text,
+        }
 
     business_report_data = {
         "reference": "S2S Business Report",
-        "group_id": report_response["ResultGroup"]["GroupId"],
+        "group_id": ET.fromstring(search_results_response.text).find(".//GroupId").text,
     }
 
-    report_xml = build_business_report_xml(business_report_data)
-
-    report_response_obj = requests.post(
-        ENDPOINTS["business-report"], headers=get_headers(), data=report_xml, timeout=30
+    report_response = requests.post(
+        ENDPOINTS["business-report"],
+        headers=get_headers(),
+        data=build_business_report_xml(business_report_data),
+        timeout=30,
     )
 
-    if report_response_obj.status_code != 200:
+    if report_response.status_code != 200:
         print(
             "Report request failed with status "
-            + str(report_response_obj.status_code)
+            + str(report_response.status_code)
             + ": "
-            + report_response_obj.text
+            + report_response.text
         )
         return {
-            "error": f"Report request failed with status {report_response_obj.status_code}",
-            "response": report_response_obj.text,
+            "error": f"Report request failed with status {report_response.status_code}",
+            "response": report_response.text,
         }
 
-    report_response = report_response_obj.text
-
-    xml_root = ET.fromstring(report_response)
-    uri_element = xml_root.find(".//Uri")
-
-    if uri_element is None:
+    if ET.fromstring(report_response.text).find(".//Uri") is None:
         print(f"Report request failed. Response: {report_response}")
+
         return {
             "error": "Report request failed - no URI found in response",
             "response": report_response,
         }
 
     final_response = requests.get(
-        uri_element.text, headers=get_headers(content_type=None), timeout=30
+        ET.fromstring(report_response.text).find(".//Uri").text,
+        headers=get_headers(content_type=None),
+        timeout=30,
     ).text
 
     return Response(final_response, media_type="application/xml")

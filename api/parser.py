@@ -54,6 +54,7 @@ def parse_business_report_xml(xml_content: str) -> Dict[str, Any]:
         "Flags": {},
         "UCCAnalysis": {},
         "CriminalHistoryAnalysis": {},
+        "LiensAndJudgementsAnalysis": {},
         "Results": {},
     }
 
@@ -90,6 +91,15 @@ def parse_business_report_xml(xml_content: str) -> Dict[str, Any]:
             if "Flags" not in result:
                 result["Flags"] = {}
             result["Flags"]["CriminalHistory"] = criminal_analysis["risk_assessment"]
+
+        # Analyze liens and judgments
+        if section_name == "LienJudgmentSection":
+            liens_analysis = _analyze_liens_and_judgments(section)
+            result["LiensAndJudgementsAnalysis"] = liens_analysis
+            # Add liens flag based on risk assessment
+            if "Flags" not in result:
+                result["Flags"] = {}
+            result["Flags"]["LiensAndJudgements"] = liens_analysis["risk_assessment"]
 
     return result
 
@@ -367,6 +377,149 @@ def _analyze_criminal_history(section: ET.Element) -> Dict[str, Any]:
         "felony_charges": felony_charges,
         "active_cases": active_cases,
         "criminal_records": all_criminal_records,
+    }
+
+
+def _analyze_liens_and_judgments(section: ET.Element) -> Dict[str, Any]:
+    """Analyze liens and judgments to provide summary statistics and risk assessment."""
+    lien_records = section.findall(".//LienJudgeRecord")
+    if not lien_records:
+        return {
+            "risk_assessment": "None",
+            "total_liens_and_judgments": 0,
+            "total_amount": 0,
+            "active_liens": 0,
+            "released_liens": 0,
+            "tax_liens": 0,
+            "civil_judgments": 0,
+            "recent_liens": 0,  # Last 5 years
+            "high_value_liens": 0,  # Over $10,000
+            "lien_records": [],
+        }
+
+    total_records = len(lien_records)
+    total_amount = 0
+    active_liens = 0
+    released_liens = 0
+    tax_liens = 0
+    civil_judgments = 0
+    recent_liens = 0
+    high_value_liens = 0
+    all_lien_records = []
+
+    for record in lien_records:
+        # Extract filing information
+        filing_info = record.find(".//FilingInfo")
+        if filing_info is None:
+            continue
+
+        filing_type = _get_text(filing_info, "TypeofFiling")
+        file_date = _get_text(filing_info, "FileDate")
+        release_date = _get_text(filing_info, "ReleaseDate")
+
+        # Extract debtor information
+        debtor_info = record.find(".//Debtor")
+        if debtor_info is None:
+            continue
+
+        owed_amount = _get_text(debtor_info, "DebtorOwedAmount")
+
+        # Extract creditor information
+        creditor_info = record.find(".//Creditor")
+        creditor_name = ""
+        if creditor_info is not None:
+            party_info = creditor_info.find(".//PartyInfo")
+            if party_info is not None:
+                person_name = party_info.find(".//PersonName")
+                if person_name is not None:
+                    creditor_name = _get_text(person_name, "FullName")
+
+        # Parse amount
+        amount = 0
+        try:
+            if owed_amount and owed_amount.startswith("$"):
+                amount = float(owed_amount.replace("$", "").replace(",", ""))
+                total_amount += amount
+        except (ValueError, AttributeError):
+            pass
+
+        # Determine lien characteristics
+        is_tax_lien = any(
+            tax in filing_type.upper()
+            for tax in ["TAX", "IRS", "STATE TAX", "FEDERAL TAX"]
+        )
+        is_civil_judgment = any(
+            judgment in filing_type.upper() for judgment in ["JUDGMENT", "CIVIL"]
+        )
+        is_released = release_date is not None and release_date.strip() != ""
+        is_recent = False
+        is_high_value = amount > 10000
+
+        # Check if recent (last 5 years)
+        try:
+            if file_date:
+                file_year = int(file_date.split("/")[2])
+                if file_year >= 2019:  # Last 5 years
+                    recent_liens += 1
+                    is_recent = True
+        except (ValueError, IndexError):
+            pass
+
+        if is_tax_lien:
+            tax_liens += 1
+        if is_civil_judgment:
+            civil_judgments += 1
+        if is_released:
+            released_liens += 1
+        else:
+            active_liens += 1
+        if is_high_value:
+            high_value_liens += 1
+
+        lien_record = {
+            "creditor_name": creditor_name,
+            "filing_type": filing_type,
+            "file_date": file_date,
+            "release_date": release_date,
+            "amount": amount,
+            "is_tax_lien": is_tax_lien,
+            "is_civil_judgment": is_civil_judgment,
+            "is_released": is_released,
+            "is_active": not is_released,
+            "is_recent": is_recent,
+            "is_high_value": is_high_value,
+        }
+        all_lien_records.append(lien_record)
+
+    # Risk assessment logic for liens and judgments
+    risk_level = "None"
+    if total_records > 0:
+        # High risk: Active liens, high value liens, or recent liens
+        if (
+            active_liens > 0
+            or high_value_liens > 0
+            or recent_liens > 0
+            or tax_liens > 0
+        ):
+            risk_level = "High"
+        # Medium risk: Released liens or moderate amounts
+        elif total_amount > 5000:
+            risk_level = "Medium"
+        # Low risk: Old, released, low-value liens
+        else:
+            risk_level = "Low"
+
+    return {
+        "risk_assessment": risk_level,
+        "total_liens_and_judgments": total_records,
+        "total_amount": total_amount,
+        "active_liens": active_liens,
+        "released_liens": released_liens,
+        "tax_liens": tax_liens,
+        "civil_judgments": civil_judgments,
+        "recent_liens": recent_liens,
+        "high_value_liens": high_value_liens,
+        "lien_records": all_lien_records,
     }
 
 

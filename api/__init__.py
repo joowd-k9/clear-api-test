@@ -3,4 +3,4 @@
 from .token import Token
 from .config import ENDPOINTS
 
-__all__ = ['Token', 'ENDPOINTS']
+__all__ = ["Token", "ENDPOINTS"]

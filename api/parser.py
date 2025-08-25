@@ -38,14 +38,14 @@ def _element_to_dict(element: ET.Element) -> Dict[str, Any]:
 
     # Add attributes
     if element.attrib:
-        result['@attributes'] = element.attrib
+        result["@attributes"] = element.attrib
 
     # Process child elements
     for child in element:
         tag = child.tag
         # Remove namespace prefix if present
-        if '}' in tag:
-            tag = tag.split('}', 1)[1]
+        if "}" in tag:
+            tag = tag.split("}", 1)[1]
 
         child_dict = _element_to_dict(child)
 
@@ -68,6 +68,6 @@ def _element_to_dict(element: ET.Element) -> Dict[str, Any]:
 
     # If element has both text and children, add text as a special key
     elif element.text and element.text.strip():
-        result['_text'] = element.text.strip()
+        result["_text"] = element.text.strip()
 
     return result

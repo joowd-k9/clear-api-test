@@ -2,7 +2,7 @@
 
 import os
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 import requests
 from diskcache import Cache
 from .config import ENDPOINTS
@@ -17,11 +17,11 @@ class Token:
     and reads client credentials from environment variables.
     """
 
-    _instance: Optional['Token'] = None
+    _instance: Optional["Token"] = None
     _cache: Optional[Cache] = None
     _cache_key = "clear_api_token"
 
-    def __new__(cls) -> 'Token':
+    def __new__(cls) -> "Token":
         """Ensure only one instance of Token class exists."""
         if cls._instance is None:
             cls._instance = super(Token, cls).__new__(cls)
@@ -30,7 +30,7 @@ class Token:
 
     def __init__(self) -> None:
         """Initialize the Token singleton if not already initialized."""
-        if getattr(self, '_initialized', False):
+        if getattr(self, "_initialized", False):
             return
 
         # Initialize diskcache for persistent storage
@@ -46,7 +46,7 @@ class Token:
 
         if not self.client_key or not self.client_secret:
             raise ValueError(
-                "CLEAR_CLIENT_KEY and CLEAR_CLIENT_SECRET environment variables " \
+                "CLEAR_CLIENT_KEY and CLEAR_CLIENT_SECRET environment variables "
                 "must be set"
             )
 
@@ -87,14 +87,12 @@ class Token:
         Raises:
             requests.RequestException: If token request fails
         """
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded"
-        }
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
         data = {
             "grant_type": "client_credentials",
             "client_id": self.client_key,
-            "client_secret": self.client_secret
+            "client_secret": self.client_secret,
         }
 
         response = requests.post(self.auth_url, headers=headers, data=data, timeout=30)
@@ -134,5 +132,5 @@ class Token:
         return {
             "token": token[:10] + "..." if len(token) > 10 else token,
             "expires_in": expires_in,
-            "is_valid": current_time < expires_at - 60
+            "is_valid": current_time < expires_at - 60,
         }

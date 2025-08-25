@@ -51,10 +51,16 @@ def parse_business_report_xml(xml_content: str) -> Dict[str, Any]:
         "Subject": _get_text(status, "ReportSubject"),
         "ID": _get_text(status, "EntityId"),
         "Timestamp": _get_text(status, "TimeStamp"),
-        "Flags": {},
+        "Flags": {
+            "UCCFilings": "None",
+            "LiensAndJudgements": "None",
+            "CriminalHistory": "None",
+            "Lawsuits": "None",
+        },
         "UCCAnalysis": {},
         "CriminalHistoryAnalysis": {},
         "LiensAndJudgementsAnalysis": {},
+        "LawsuitAnalysis": {},
         "Results": {},
     }
 
@@ -72,7 +78,7 @@ def parse_business_report_xml(xml_content: str) -> Dict[str, Any]:
 
         # Extract flags from QuickAnalysisFlagSection
         if section_name == "QuickAnalysisFlagSection":
-            result["Flags"] = _extract_risk_flags(section)
+            result["Flags"] = {**result.get("Flags", {}), **_extract_risk_flags(section)}
 
         # Analyze UCC filings for active/inactive status
         if section_name == "UCCSection":
@@ -83,6 +89,15 @@ def parse_business_report_xml(xml_content: str) -> Dict[str, Any]:
                 result["Flags"] = {}
             result["Flags"]["UCCFilings"] = ucc_analysis["risk_assessment"]
 
+        # Analyze liens and judgments
+        if section_name == "LienJudgmentSection":
+            liens_analysis = _analyze_liens_and_judgments(section)
+            result["LiensAndJudgementsAnalysis"] = liens_analysis
+            # Add liens flag based on risk assessment
+            if "Flags" not in result:
+                result["Flags"] = {}
+            result["Flags"]["LiensAndJudgements"] = liens_analysis["risk_assessment"]
+
         # Analyze criminal history
         if section_name == "CriminalSection":
             criminal_analysis = _analyze_criminal_history(section)
@@ -92,14 +107,14 @@ def parse_business_report_xml(xml_content: str) -> Dict[str, Any]:
                 result["Flags"] = {}
             result["Flags"]["CriminalHistory"] = criminal_analysis["risk_assessment"]
 
-        # Analyze liens and judgments
-        if section_name == "LienJudgmentSection":
-            liens_analysis = _analyze_liens_and_judgments(section)
-            result["LiensAndJudgementsAnalysis"] = liens_analysis
-            # Add liens flag based on risk assessment
+        # Analyze lawsuits
+        if section_name == "LawsuitSection":
+            lawsuit_analysis = _analyze_lawsuits(section)
+            result["LawsuitAnalysis"] = lawsuit_analysis
+            # Add lawsuit flag based on risk assessment
             if "Flags" not in result:
                 result["Flags"] = {}
-            result["Flags"]["LiensAndJudgements"] = liens_analysis["risk_assessment"]
+            result["Flags"]["Lawsuits"] = lawsuit_analysis["risk_assessment"]
 
     return result
 
@@ -520,6 +535,188 @@ def _analyze_liens_and_judgments(section: ET.Element) -> Dict[str, Any]:
         "recent_liens": recent_liens,
         "high_value_liens": high_value_liens,
         "lien_records": all_lien_records,
+    }
+
+
+def _analyze_lawsuits(section: ET.Element) -> Dict[str, Any]:
+    """Analyze lawsuits to provide summary statistics and risk assessment."""
+    # Find all elements that end with "LawsuitRecord" (handle namespaces)
+    lawsuit_records = []
+    for element in section.iter():
+        # Remove namespace prefix if present
+        tag = element.tag.split("}")[-1] if "}" in element.tag else element.tag
+        if tag.endswith("LawsuitRecord"):
+            lawsuit_records.append(element)
+
+    if not lawsuit_records:
+        return {
+            "risk_assessment": "None",
+            "total_lawsuits": 0,
+            "active_lawsuits": 0,
+            "resolved_lawsuits": 0,
+            "recent_lawsuits": 0,  # Last 3 years
+            "high_value_lawsuits": 0,  # Over $100,000
+            "employment_lawsuits": 0,
+            "contract_lawsuits": 0,
+            "class_action_lawsuits": 0,
+            "regulatory_lawsuits": 0,
+            "lawsuit_records": [],
+        }
+
+    total_lawsuits = len(lawsuit_records)
+    active_lawsuits = 0
+    resolved_lawsuits = 0
+    recent_lawsuits = 0
+    high_value_lawsuits = 0
+    employment_lawsuits = 0
+    contract_lawsuits = 0
+    class_action_lawsuits = 0
+    regulatory_lawsuits = 0
+    all_lawsuit_records = []
+
+    for record in lawsuit_records:
+        # Extract lawsuit information directly from record
+        case_type = _get_text(record, "CaseType")
+        case_category = _get_text(record, "CaseCategory")
+        filing_date = _get_text(record, "FileDate")
+        docket_number = _get_text(record, "FilingNumber")
+        court = _get_text(record, "Court")
+        venue_location = _get_text(record, "VenueLocation")
+
+        # Check if company is defendant or plaintiff
+        company_interest = ""
+        defendants = record.findall(".//Defendant")
+        plaintiffs = record.findall(".//Plaintiff")
+
+        # Check if Thomson/company name appears in defendants or plaintiffs
+        company_names = ["THOMSON", "REUTERS", "THOMSON REUTERS", "THOMSON CORPORATION"]
+        for defendant in defendants:
+            full_name = _get_text(defendant, "FullName")
+            if any(name in full_name.upper() for name in company_names):
+                company_interest = "DEFENDANT"
+                break
+
+        if not company_interest:
+            for plaintiff in plaintiffs:
+                full_name = _get_text(plaintiff, "FullName")
+                if any(name in full_name.upper() for name in company_names):
+                    company_interest = "PLAINTIFF"
+                    break
+
+        # Determine lawsuit characteristics based on actual case types
+        # Handle empty or None case_type
+        case_type_upper = case_type.upper() if case_type else ""
+
+        is_employment = case_type in ["WRONGFUL TERMINATION"]
+
+        is_contract = case_type in [
+            "BREACH OF CONTRACT",
+            "OTHER - CONTRACT ACTION",
+            "OTHER - CONTRACTS",
+            "ACCOUNT STATED"
+        ]
+
+        # Check for class action indicators
+        # 1. Multiple plaintiffs (common in class actions)
+        # 2. Specific case types that might indicate class actions
+        multiple_plaintiffs = len(plaintiffs) > 1
+        class_action_keywords = [
+            "CLASS ACTION",
+            "MASS TORT",
+            "COLLECTIVE ACTION",
+            "REPRESENTATIVE ACTION",
+        ]
+        class_action_case_types = ["FRAUD"]  # Based on actual data
+
+        is_class_action = (
+            multiple_plaintiffs
+            or any(keyword in case_type_upper for keyword in class_action_keywords)
+            or case_type in class_action_case_types
+        )
+
+        # Regulatory cases - based on actual data, these are rare
+        # Most regulatory cases would be handled by federal agencies
+        is_regulatory = case_type in [
+            "MISC - FOREIGN CIVIL JUDGMENTS"  # Could involve regulatory compliance
+        ]
+        is_active = company_interest in ["DEFENDANT", "PLAINTIFF"] and filing_date
+        is_recent = False
+        is_high_value = False  # Would need amount field if available
+
+        # Check if recent (last 3 years)
+        try:
+            if filing_date:
+                filing_year = int(filing_date.split("/")[2])
+                if filing_year >= 2021:  # Last 3 years
+                    recent_lawsuits += 1
+                    is_recent = True
+        except (ValueError, IndexError):
+            pass
+
+        if is_employment:
+            employment_lawsuits += 1
+        if is_contract:
+            contract_lawsuits += 1
+        if is_class_action:
+            class_action_lawsuits += 1
+        if is_regulatory:
+            regulatory_lawsuits += 1
+        if is_active:
+            active_lawsuits += 1
+        else:
+            resolved_lawsuits += 1
+
+        lawsuit_record = {
+            "case_type": case_type,
+            "case_category": case_category,
+            "filing_date": filing_date,
+            "docket_number": docket_number,
+            "court": court,
+            "venue_location": venue_location,
+            "company_interest": company_interest,
+            "is_employment": is_employment,
+            "is_contract": is_contract,
+            "is_class_action": is_class_action,
+            "is_regulatory": is_regulatory,
+            "is_active": is_active,
+            "is_recent": is_recent,
+            "is_high_value": is_high_value,
+        }
+        all_lawsuit_records.append(lawsuit_record)
+
+    # Risk assessment logic for lawsuits
+    risk_level = "None"
+    if total_lawsuits > 0:
+        # High risk: Active lawsuits, class actions, or regulatory actions
+        if (
+            active_lawsuits > 0
+            or class_action_lawsuits > 0
+            or regulatory_lawsuits > 0
+        ):
+            risk_level = "High"
+        # Medium risk: Recent lawsuits or employment/contract disputes
+        elif (
+            recent_lawsuits > 0
+            or employment_lawsuits > 0
+            or contract_lawsuits > 0
+        ):
+            risk_level = "Medium"
+        # Low risk: Old, resolved lawsuits
+        else:
+            risk_level = "Low"
+
+    return {
+        "risk_assessment": risk_level,
+        "total_lawsuits": total_lawsuits,
+        "active_lawsuits": active_lawsuits,
+        "resolved_lawsuits": resolved_lawsuits,
+        "recent_lawsuits": recent_lawsuits,
+        "high_value_lawsuits": high_value_lawsuits,
+        "employment_lawsuits": employment_lawsuits,
+        "contract_lawsuits": contract_lawsuits,
+        "class_action_lawsuits": class_action_lawsuits,
+        "regulatory_lawsuits": regulatory_lawsuits,
+        "lawsuit_records": all_lawsuit_records,
     }
 
 

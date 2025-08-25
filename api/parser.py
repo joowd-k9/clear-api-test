@@ -56,10 +56,12 @@ def parse_business_report_xml(xml_content: str) -> Dict[str, Any]:
             "LiensAndJudgements": "None",
             "CriminalHistory": "None",
             "Lawsuits": "None",
+            "Dockets": "None",
         },
-        "UCCAnalysis": {},
-        "CriminalHistoryAnalysis": {},
+        "UCCFilingsAnalysis": {},
         "LiensAndJudgementsAnalysis": {},
+        "CriminalHistoryAnalysis": {},
+        "DocketAnalysis": {},
         "LawsuitAnalysis": {},
         "Results": {},
     }
@@ -83,7 +85,7 @@ def parse_business_report_xml(xml_content: str) -> Dict[str, Any]:
         # Analyze UCC filings for active/inactive status
         if section_name == "UCCSection":
             ucc_analysis = _analyze_ucc_filings(section)
-            result["UCCAnalysis"] = ucc_analysis
+            result["UCCFilingsAnalysis"] = ucc_analysis
             # Add UCC flag based on risk assessment
             if "Flags" not in result:
                 result["Flags"] = {}
@@ -115,6 +117,15 @@ def parse_business_report_xml(xml_content: str) -> Dict[str, Any]:
             if "Flags" not in result:
                 result["Flags"] = {}
             result["Flags"]["Lawsuits"] = lawsuit_analysis["risk_assessment"]
+
+        # Analyze docket records
+        if section_name == "DocketSection":
+            docket_analysis = _analyze_docket_records(section)
+            result["DocketAnalysis"] = docket_analysis
+            # Add docket flag based on risk assessment
+            if "Flags" not in result:
+                result["Flags"] = {}
+            result["Flags"]["Dockets"] = docket_analysis["risk_assessment"]
 
     return result
 
@@ -717,6 +728,123 @@ def _analyze_lawsuits(section: ET.Element) -> Dict[str, Any]:
         "class_action_lawsuits": class_action_lawsuits,
         "regulatory_lawsuits": regulatory_lawsuits,
         "lawsuit_records": all_lawsuit_records,
+    }
+
+
+def _analyze_docket_records(section: ET.Element) -> Dict[str, Any]:
+    """Analyze docket records to provide summary statistics and risk assessment."""
+    docket_records = section.findall(".//CompanyDocketRecord")
+
+    if not docket_records:
+        return {
+            "risk_assessment": "None",
+            "total_docket_records": 0,
+            "federal_docket_records": 0,
+            "state_docket_records": 0,
+            "recent_docket_records": 0,  # Last 3 years
+            "company_as_defendant": 0,
+            "company_as_plaintiff": 0,
+            "active_docket_records": 0,
+            "docket_records": [],
+        }
+
+    total_docket_records = len(docket_records)
+    federal_docket_records = 0
+    state_docket_records = 0
+    recent_docket_records = 0
+    company_as_defendant = 0
+    company_as_plaintiff = 0
+    active_docket_records = 0
+    all_docket_records = []
+
+    for record in docket_records:
+        docket_info = record.find(".//DocketInfo")
+        if docket_info is None:
+            continue
+
+        docket_title = _get_text(docket_info, "DocketTitle")
+        docket_number = _get_text(docket_info, "DocketNumber")
+        filing_date = _get_text(docket_info, "FilingDate")
+        court = _get_text(docket_info, "Court")
+        nature_of_suit = _get_text(docket_info, "NatureOfSuit")
+        company_interest = _get_text(docket_info, "CompanyInterest")
+        source = _get_text(docket_info, "Source")
+
+        # Determine record type
+        is_federal = source == "Federal Docket Record" or "FED" in court.upper() or "C.A." in court
+        is_state = source == "State Docket Record" or not is_federal
+
+        # Check if recent (last 3 years)
+        is_recent = False
+        try:
+            if filing_date:
+                filing_year = int(filing_date.split("/")[2])
+                if filing_year >= 2021:  # Last 3 years
+                    recent_docket_records += 1
+                    is_recent = True
+        except (ValueError, IndexError):
+            pass
+
+        # Check company role
+        is_defendant = "DEFENDANT" in company_interest.upper()
+        is_plaintiff = "PLAINTIFF" in company_interest.upper()
+
+        # Assume active if recent (within last 3 years)
+        is_active = is_recent
+
+        if is_federal:
+            federal_docket_records += 1
+        else:
+            state_docket_records += 1
+
+        if is_defendant:
+            company_as_defendant += 1
+        elif is_plaintiff:
+            company_as_plaintiff += 1
+
+        if is_active:
+            active_docket_records += 1
+
+        docket_record = {
+            "docket_title": docket_title,
+            "docket_number": docket_number,
+            "filing_date": filing_date,
+            "court": court,
+            "nature_of_suit": nature_of_suit,
+            "company_interest": company_interest,
+            "source": source,
+            "is_federal": is_federal,
+            "is_state": is_state,
+            "is_recent": is_recent,
+            "is_defendant": is_defendant,
+            "is_plaintiff": is_plaintiff,
+            "is_active": is_active,
+        }
+        all_docket_records.append(docket_record)
+
+    # Risk assessment logic for docket records
+    risk_level = "None"
+    if total_docket_records > 0:
+        # High risk: Recent federal cases, company as defendant, or multiple active cases
+        if (recent_docket_records > 0 and federal_docket_records > 0) or company_as_defendant > 2:
+            risk_level = "High"
+        # Medium risk: Recent state cases or moderate number of cases
+        elif recent_docket_records > 0 or total_docket_records > 5:
+            risk_level = "Medium"
+        # Low risk: Old cases or company as plaintiff
+        else:
+            risk_level = "Low"
+
+    return {
+        "risk_assessment": risk_level,
+        "total_docket_records": total_docket_records,
+        "federal_docket_records": federal_docket_records,
+        "state_docket_records": state_docket_records,
+        "recent_docket_records": recent_docket_records,
+        "company_as_defendant": company_as_defendant,
+        "company_as_plaintiff": company_as_plaintiff,
+        "active_docket_records": active_docket_records,
+        "docket_records": all_docket_records,
     }
 
 

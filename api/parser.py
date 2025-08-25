@@ -7,33 +7,6 @@ from typing import Dict, Any
 def parse_business_report_xml(xml_content: str) -> Dict[str, Any]:
     """
     Parse business report XML and convert to JSON format.
-
-    Args:
-        xml_content: XML string from business report response
-
-    Returns:
-        Dict with structure:
-        {
-            "Reference": str,
-            "Type": str,
-            "Subject": str,
-            "Id": str,
-            "Timestamp": str,
-            "Flags": {
-                "WorldCheck": str,
-                "OFAC": str,
-                "GlobalSanctions": str,
-                ...
-            },
-            "Results": {
-                "SectionName": {
-                    "Description": str,
-                    "Status": str,
-                    "RecordCount": str,
-                    "Details": dict
-                }
-            }
-        }
     """
     try:
         root = ET.fromstring(xml_content)
@@ -61,8 +34,8 @@ def parse_business_report_xml(xml_content: str) -> Dict[str, Any]:
         "UCCFilingsAnalysis": {},
         "LiensAndJudgementsAnalysis": {},
         "CriminalHistoryAnalysis": {},
-        "DocketAnalysis": {},
         "LawsuitAnalysis": {},
+        "DocketAnalysis": {},
         "Results": {},
     }
 
@@ -80,53 +53,31 @@ def parse_business_report_xml(xml_content: str) -> Dict[str, Any]:
         }
         result["Results"][clean_section_name] = section_data
 
-        # Extract flags from QuickAnalysisFlagSection
+        # Handle special sections
         if section_name == "QuickAnalysisFlagSection":
-            result["Flags"] = {**result.get("Flags", {}), **_extract_risk_flags(section)}
-
-        # Analyze UCC filings for active/inactive status
-        if section_name == "UCCSection":
+            result["Flags"] = {
+                **result.get("Flags", {}),
+                **_extract_risk_flags(section),
+            }
+        elif section_name == "UCCSection":
             ucc_analysis = _analyze_ucc_filings(section)
             result["UCCFilingsAnalysis"] = ucc_analysis
-            # Add UCC flag based on risk assessment
-            if "Flags" not in result:
-                result["Flags"] = {}
             result["Flags"]["UCCFilings"] = ucc_analysis["risk_assessment"]
-
-        # Analyze liens and judgments
-        if section_name == "LienJudgmentSection":
+        elif section_name == "LienJudgmentSection":
             liens_analysis = _analyze_liens_and_judgments(section)
             result["LiensAndJudgementsAnalysis"] = liens_analysis
-            # Add liens flag based on risk assessment
-            if "Flags" not in result:
-                result["Flags"] = {}
             result["Flags"]["LiensAndJudgements"] = liens_analysis["risk_assessment"]
-
-        # Analyze criminal history
-        if section_name == "CriminalSection":
+        elif section_name == "CriminalSection":
             criminal_analysis = _analyze_criminal_history(section)
             result["CriminalHistoryAnalysis"] = criminal_analysis
-            # Add criminal flag based on risk assessment
-            if "Flags" not in result:
-                result["Flags"] = {}
             result["Flags"]["CriminalHistory"] = criminal_analysis["risk_assessment"]
-
-        # Analyze lawsuits
-        if section_name == "LawsuitSection":
+        elif section_name == "LawsuitSection":
             lawsuit_analysis = _analyze_lawsuits(section)
             result["LawsuitAnalysis"] = lawsuit_analysis
-            # Add lawsuit flag based on risk assessment
-            if "Flags" not in result:
-                result["Flags"] = {}
             result["Flags"]["Lawsuits"] = lawsuit_analysis["risk_assessment"]
-
-        # Analyze docket records
-        if section_name == "DocketSection":
+        elif section_name == "DocketSection":
             docket_analysis = _analyze_docket_records(section)
             result["DocketAnalysis"] = docket_analysis
-            # Add docket flag based on risk assessment
-            if "Flags" not in result:
-                result["Flags"] = {}
             result["Flags"]["Dockets"] = docket_analysis["risk_assessment"]
 
     return result
@@ -167,8 +118,9 @@ def _analyze_ucc_filings(section: ET.Element) -> Dict[str, Any]:
     if not ucc_records:
         return {"active_count": 0, "inactive_count": 0, "filings": []}
 
-        # Group filings by reference number to track amendments
+    # Group filings by reference number to track amendments
     filing_groups = {}
+    stats = {"active": 0, "inactive": 0, "all_groups": []}
 
     for record in ucc_records:
         filing_info = record.find(".//UCCFilingInfo")
@@ -183,55 +135,43 @@ def _analyze_ucc_filings(section: ET.Element) -> Dict[str, Any]:
         if business_info is None:
             continue
 
-        filing_type = _get_text(business_info, "FilingType")
-        filing_number = _get_text(business_info, "FilingNumber")
-        filing_date = _get_text(business_info, "FilingDate")
-        reference_number = _get_text(filing_stmt, "ReferenceFileNumber")
-
-        # Clean reference number (remove spaces) and use as key, or filing number if no reference
-        clean_reference = reference_number.replace(" ", "") if reference_number else ""
-        key = clean_reference if clean_reference else filing_number
-
-        if key not in filing_groups:
-            filing_groups[key] = []
-
         filing_data = {
-            "filing_type": filing_type,
-            "filing_number": filing_number,
-            "filing_date": filing_date,
-            "reference_number": clean_reference,  # Use cleaned reference number
-            "is_active": _is_active_ucc_filing(filing_type),
+            "filing_type": _get_text(business_info, "FilingType"),
+            "filing_number": _get_text(business_info, "FilingNumber"),
+            "filing_date": _get_text(business_info, "FilingDate"),
+            "reference_number": _get_text(filing_stmt, "ReferenceFileNumber").replace(
+                " ", ""
+            ),
+            "is_active": _is_active_ucc_filing(_get_text(business_info, "FilingType")),
         }
 
+        # Use cleaned reference as key, or filing number if no reference
+        key = (
+            filing_data["reference_number"]
+            if filing_data["reference_number"]
+            else filing_data["filing_number"]
+        )
+        if key not in filing_groups:
+            filing_groups[key] = []
         filing_groups[key].append(filing_data)
 
-        # Determine final status for each filing group (unique security interest)
-    active_security_interests = 0
-    inactive_security_interests = 0
-    all_filing_groups = []
-
+    # Process filing groups
     for key, filings in filing_groups.items():
-        # Sort by filing date to get chronological order (convert MM/DD/YYYY to sortable format)
+        # Sort by filing date (MM/DD/YYYY to YYYYMMDD for sorting)
         filings.sort(
             key=lambda x: x["filing_date"].split("/")[2]
             + x["filing_date"].split("/")[0]
             + x["filing_date"].split("/")[1]
         )
 
-        # Determine final status based on the most recent filing
         latest_filing = filings[-1]
         final_status = _determine_final_ucc_status(filings)
 
-        # Find the original filing (first ORIGINAL filing, or first filing if no ORIGINAL)
-        original_filing = None
-        for filing in filings:
-            if filing["filing_type"] == "ORIGINAL":
-                original_filing = filing
-                break
-        if original_filing is None:
-            original_filing = filings[0]  # Use first filing if no ORIGINAL found
+        # Find original filing
+        original_filing = next(
+            (f for f in filings if f["filing_type"] == "ORIGINAL"), filings[0]
+        )
 
-        # Create a filing group summary
         filing_group = {
             "security_interest_id": key,
             "original_filing": original_filing,
@@ -243,33 +183,32 @@ def _analyze_ucc_filings(section: ET.Element) -> Dict[str, Any]:
         }
 
         if final_status == "ACTIVE":
-            active_security_interests += 1
+            stats["active"] += 1
         else:
-            inactive_security_interests += 1
-
-        all_filing_groups.append(filing_group)
+            stats["inactive"] += 1
+        stats["all_groups"].append(filing_group)
 
     total_filings_count = sum(
-        len(group["filing_history"]) for group in all_filing_groups
+        len(group["filing_history"]) for group in stats["all_groups"]
     )
 
-    # Risk assessment logic for UCC filings
+    # Risk assessment logic
     risk_level = "None"
     if total_filings_count > 0:
-        if active_security_interests > 20:  # High debt burden
+        if stats["active"] > 20:
             risk_level = "High"
-        elif active_security_interests > 10:  # Moderate debt burden
+        elif stats["active"] > 10:
             risk_level = "Medium"
-        elif active_security_interests > 0:
+        elif stats["active"] > 0:
             risk_level = "Low"
 
     return {
         "risk_assessment": risk_level,
         "total_ucc_filings": total_filings_count,
-        "distinct_ucc_filings": len(all_filing_groups),
-        "active_ucc_filings": active_security_interests,
-        "inactive_ucc_filings": inactive_security_interests,
-        "grouped_ucc_filings": all_filing_groups,
+        "distinct_ucc_filings": len(stats["all_groups"]),
+        "active_ucc_filings": stats["active"],
+        "inactive_ucc_filings": stats["inactive"],
+        "grouped_ucc_filings": stats["all_groups"],
     }
 
 
@@ -626,7 +565,7 @@ def _analyze_lawsuits(section: ET.Element) -> Dict[str, Any]:
             "BREACH OF CONTRACT",
             "OTHER - CONTRACT ACTION",
             "OTHER - CONTRACTS",
-            "ACCOUNT STATED"
+            "ACCOUNT STATED",
         ]
 
         # Check for class action indicators
@@ -701,18 +640,10 @@ def _analyze_lawsuits(section: ET.Element) -> Dict[str, Any]:
     risk_level = "None"
     if total_lawsuits > 0:
         # High risk: Active lawsuits, class actions, or regulatory actions
-        if (
-            active_lawsuits > 0
-            or class_action_lawsuits > 0
-            or regulatory_lawsuits > 0
-        ):
+        if active_lawsuits > 0 or class_action_lawsuits > 0 or regulatory_lawsuits > 0:
             risk_level = "High"
         # Medium risk: Recent lawsuits or employment/contract disputes
-        elif (
-            recent_lawsuits > 0
-            or employment_lawsuits > 0
-            or contract_lawsuits > 0
-        ):
+        elif recent_lawsuits > 0 or employment_lawsuits > 0 or contract_lawsuits > 0:
             risk_level = "Medium"
         # Low risk: Old, resolved lawsuits
         else:
@@ -773,7 +704,11 @@ def _analyze_docket_records(section: ET.Element) -> Dict[str, Any]:
         source = _get_text(docket_info, "Source")
 
         # Determine record type
-        is_federal = source == "Federal Docket Record" or "FED" in court.upper() or "C.A." in court
+        is_federal = (
+            source == "Federal Docket Record"
+            or "FED" in court.upper()
+            or "C.A." in court
+        )
         is_state = source == "State Docket Record" or not is_federal
 
         # Check if recent (last 3 years)
@@ -828,7 +763,9 @@ def _analyze_docket_records(section: ET.Element) -> Dict[str, Any]:
     risk_level = "None"
     if total_docket_records > 0:
         # High risk: Recent federal cases, company as defendant, or multiple active cases
-        if (recent_docket_records > 0 and federal_docket_records > 0) or company_as_defendant > 2:
+        if (
+            recent_docket_records > 0 and federal_docket_records > 0
+        ) or company_as_defendant > 2:
             risk_level = "High"
         # Medium risk: Recent state cases or moderate number of cases
         elif recent_docket_records > 0 or total_docket_records > 5:

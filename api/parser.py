@@ -70,13 +70,15 @@ def parse_business_report_xml(xml_content: str) -> Dict[str, Any]:
     section_results = root.findall(".//SectionResults")
     for section in section_results:
         section_name = _get_text(section, "SectionName")
+        # Remove "Section" suffix for cleaner naming
+        clean_section_name = section_name.replace("Section", "")
         section_data = {
             "Description": _get_text(section, "CLEARReportDescription"),
             "Status": _get_text(section, "SectionStatus"),
             "RecordCount": _get_text(section, "SectionRecordCount"),
             "Details": _parse_section_details(section),
         }
-        result["Results"][section_name] = section_data
+        result["Results"][clean_section_name] = section_data
 
         # Extract flags from QuickAnalysisFlagSection
         if section_name == "QuickAnalysisFlagSection":

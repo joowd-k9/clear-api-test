@@ -1,18 +1,10 @@
 """Builder module for converting JSON requests to XML format for Thomson Reuters Clear S2S API."""
 
 from typing import Dict, Any
-import xml.etree.ElementTree as ET
+import os
+import re
 
-NS = {
-    'ps': 'http://clear.thomsonreuters.com/api/search/2.0',
-    'p1': 'com/thomsonreuters/schemas/search',
-    'bs': 'http://clear.thomsonreuters.com/api/search/2.0',
-    'b1': 'com/thomsonreuters/schemas/search'
-}
-
-for prefix, uri in NS.items():
-    ET.register_namespace(prefix, uri)
-
+# Keep the validation constants and functions
 GLB_CODES = {
     'C': 'For use by a person holding a legal or beneficial interest relating to the consumer.',
     'A': 'For use in complying with federal, state, or local laws, rules, and other ' \
@@ -89,291 +81,161 @@ def validate_permissible_purpose(
     }
 
 
+def _load_template(template_name: str) -> str:
+    """Load XML template from templates directory."""
+    template_path = os.path.join(os.path.dirname(__file__), '..', 'templates', template_name)
+    with open(template_path, 'r', encoding='utf-8') as f:
+        return f.read()
+
+
+def _flatten_dict(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten nested dictionary for template interpolation."""
+    flat_data = {}
+
+    for key, value in data.items():
+        if isinstance(value, dict):
+            # Handle nested dictionaries by extracting their values directly
+            for nested_key, nested_value in value.items():
+                flat_data[nested_key] = nested_value
+        else:
+            flat_data[key] = value
+
+    return flat_data
+
+
+def _safe_format_template(template: str, data: Dict[str, Any]) -> str:
+    """Safely format template with data, providing empty string for missing keys."""
+
+    def replace_placeholder(match):
+        key = match.group(1)
+        return str(data.get(key, ''))
+
+    return re.sub(r'\{(\w+)\}', replace_placeholder, template)
+
+
 def build_person_search_xml(json_data: Dict[str, Any]) -> str:
     """
-    Convert JSON person search request to XML format.
+    Convert JSON person search request to XML format using template.
 
     Args:
         json_data: Dictionary containing person search parameters
 
     Returns:
         str: XML string for person search request
-
-    Example JSON format:
-    {
-        "permissible_purpose": {
-            "glb": "C",
-            "dppa": "1",
-            "voter": "2"
-        },
-        "reference": "S2S Person Search",
-        "name_info": {
-            "last_name": "Sample-Document",
-            "first_name": "Jane",
-            "middle_initial": "",
-            "secondary_last_name": "Document"
-        },
-        "address_info": {
-            "street": "101 W 6th ST",
-            "city": "TUCSON",
-            "state": "AZ",
-            "zip_code": "85701"
-        },
-        "npi_number": "9999999999",
-        "ssn": "999-99-9990",
-        "person_birth_date": "01/01/1951",
-        "driver_license_number": "MI0022446688",
-        "datasources": {
-            "public_record_people": "true",
-            "npi_record": "true",
-            "world_check_risk_intelligence": "true"
-        }
-    }
     """
-    root = ET.Element('{http://clear.thomsonreuters.com/api/search/2.0}PersonSearchRequestV3')
+    # Validate permissible purpose if provided
+    if 'permissible_purpose' in json_data:
+        validate_permissible_purpose(**json_data['permissible_purpose'])
 
-    _add_permissible_purpose(root, json_data.get('permissible_purpose', {}))
+    # Load template
+    template = _load_template('person-search.xml')
 
-    reference = ET.SubElement(root, 'Reference')
-    reference.text = json_data.get('reference', 'S2S Person Search')
+    # Flatten nested data for template interpolation
+    flat_data = _flatten_dict(json_data)
 
-    criteria = ET.SubElement(root, 'Criteria')
-    person_criteria = ET.SubElement(criteria, '{com/thomsonreuters/schemas/search}PersonCriteria')
+    # Add default permissible purpose if not provided
+    if 'glb' not in flat_data:
+        flat_data['glb'] = 'I'
+    if 'dppa' not in flat_data:
+        flat_data['dppa'] = '6'
+    if 'voter' not in flat_data:
+        flat_data['voter'] = '7'
 
-    _add_name_info(person_criteria, json_data.get('name_info', {}))
-
-    _add_address_info(person_criteria, json_data.get('address_info', {}))
-
-    _add_simple_fields(person_criteria, json_data)
-
-    _add_datasources(root, json_data.get('datasources', {}))
-
-    return _xml_to_string(root)
+    # Interpolate template
+    return _safe_format_template(template, flat_data)
 
 
 def build_business_search_xml(json_data: Dict[str, Any]) -> str:
     """
-    Convert JSON business search request to XML format.
+    Convert JSON business search request to XML format using template.
 
     Args:
         json_data: Dictionary containing business search parameters
 
     Returns:
         str: XML string for business search request
-
-    Example JSON format:
-    {
-        "permissible_purpose": {
-            "glb": "C",
-            "dppa": "1",
-            "voter": "2"
-        },
-        "reference": "S2S Business Search",
-        "company_entity_id": "",
-        "business_name": "Thomson Reuters",
-        "corporation_info": {
-            "corporation_id": "C1586596",
-            "filing_number": "",
-            "filing_date": "",
-            "fein": "133320829",
-            "duns_number": "147833446"
-        },
-        "npi_number": "",
-        "name_info": {
-            "last_name": "Bello",
-            "first_name": "Stephane"
-        },
-        "address_info": {
-            "street": "3 Times Square",
-            "city": "New York",
-            "state": "NY",
-            "zip_code": "10036"
-        },
-        "phone_number": "646-223-4000",
-        "datasources": {
-            "public_record_business": "true",
-            "npi_record": "true",
-            "public_record_ucc_filings": "true",
-            "world_check_risk_intelligence": "true"
-        }
-    }
     """
-    root = ET.Element('{http://clear.thomsonreuters.com/api/search/2.0}BusinessSearchRequest')
+    # Validate permissible purpose if provided
+    if 'permissible_purpose' in json_data:
+        validate_permissible_purpose(**json_data['permissible_purpose'])
 
-    _add_permissible_purpose(root, json_data.get('permissible_purpose', {}))
+    # Load template
+    template = _load_template('business-search.xml')
 
-    reference = ET.SubElement(root, 'Reference')
-    reference.text = json_data.get('reference', 'S2S Business Search')
+    # Flatten nested data for template interpolation
+    flat_data = _flatten_dict(json_data)
 
-    criteria = ET.SubElement(root, 'Criteria')
-    business_criteria = ET.SubElement(criteria, '{com/thomsonreuters/schemas/search}BusinessCriteria')
+    # Add default permissible purpose if not provided
+    if 'glb' not in flat_data:
+        flat_data['glb'] = 'I'
+    if 'dppa' not in flat_data:
+        flat_data['dppa'] = '6'
+    if 'voter' not in flat_data:
+        flat_data['voter'] = '7'
 
-    company_id = ET.SubElement(business_criteria, 'CompanyEntityId')
-    company_id.text = json_data.get('company_entity_id', '')
-
-    business_name = ET.SubElement(business_criteria, 'BusinessName')
-    business_name.text = json_data.get('business_name', '')
-
-    _add_corporation_info(business_criteria, json_data.get('corporation_info', {}))
-
-    npi = ET.SubElement(business_criteria, 'NPINumber')
-    npi.text = json_data.get('npi_number', '')
-
-    _add_business_name_info(business_criteria, json_data.get('name_info', {}))
-
-    _add_address_info(business_criteria, json_data.get('address_info', {}))
-
-    phone = ET.SubElement(business_criteria, 'PhoneNumber')
-    phone.text = json_data.get('phone_number', '')
-
-    _add_business_datasources(root, json_data.get('datasources', {}))
-
-    return _xml_to_string(root)
+    # Interpolate template
+    return _safe_format_template(template, flat_data)
 
 
-def _add_corporation_info(parent: ET.Element, corp_data: Dict[str, Any]) -> None:
-    """Add CorporationInfo section."""
-    corp_info = ET.SubElement(parent, 'CorporationInfo')
+def build_person_report_xml(json_data: Dict[str, Any]) -> str:
+    """
+    Convert JSON person report request to XML format using template.
 
-    corp_fields = ['CorporationId', 'FilingNumber', 'FilingDate', 'FEIN', 'DUNSNumber']
-    for field in corp_fields:
-        elem = ET.SubElement(corp_info, field)
-        elem.text = corp_data.get(field.lower(), '')
+    Args:
+        json_data: Dictionary containing person report parameters
 
+    Returns:
+        str: XML string for person report request
+    """
+    # Validate permissible purpose if provided
+    if 'permissible_purpose' in json_data:
+        validate_permissible_purpose(**json_data['permissible_purpose'])
 
-def _add_business_datasources(root: ET.Element, datasources: Dict[str, Any]) -> None:
-    """Add Datasources section for business search."""
-    datasources_elem = ET.SubElement(root, 'Datasources')
+    # Load template
+    template = _load_template('person-report.xml')
 
-    source_fields = [
-        'PublicRecordBusiness',
-        'NPIRecord',
-        'PublicRecordUCCFilings',
-        'WorldCheckRiskIntelligence'
-    ]
-    for field in source_fields:
-        elem = ET.SubElement(datasources_elem, field)
-        elem.text = str(datasources.get(field.lower(), 'true')).lower()
+    # Flatten nested data for template interpolation
+    flat_data = _flatten_dict(json_data)
 
+    # Add default permissible purpose if not provided
+    if 'glb' not in flat_data:
+        flat_data['glb'] = 'I'
+    if 'dppa' not in flat_data:
+        flat_data['dppa'] = '6'
+    if 'voter' not in flat_data:
+        flat_data['voter'] = '7'
 
-def _add_permissible_purpose(root: ET.Element, purpose_data: Dict[str, Any]) -> None:
-    """Add PermissiblePurpose section."""
-    purpose = ET.SubElement(root, 'PermissiblePurpose')
-
-    glb = ET.SubElement(purpose, 'GLB')
-    glb.text = purpose_data.get('glb', 'See Appendix A: Permissible Use Definitions for ' \
-                                      'acceptable values')
-
-    dppa = ET.SubElement(purpose, 'DPPA')
-    dppa.text = purpose_data.get('dppa', 'See Appendix A: Permissible Use Definitions for ' \
-                                        'acceptable values')
-
-    voter = ET.SubElement(purpose, 'VOTER')
-    voter.text = purpose_data.get('voter', 'See Appendix A: Permissible Use Definitions for ' \
-                                          'acceptable values')
+    # Interpolate template
+    return _safe_format_template(template, flat_data)
 
 
-def _add_name_info(parent: ET.Element, name_data: Dict[str, Any]) -> None:
-    """Add NameInfo section."""
-    name_info = ET.SubElement(parent, 'NameInfo')
+def build_business_report_xml(json_data: Dict[str, Any]) -> str:
+    """
+    Convert JSON business report request to XML format using template.
 
-    advanced = ET.SubElement(name_info, 'AdvancedNameSearch')
-    advanced_options = [
-        'LastSecondaryNameSoundSimilarOption',
-        'SecondaryLastNameOption',
-        'FirstNameBeginsWithOption',
-        'FirstNameSoundSimilarOption',
-        'FirstNameExactMatchOption'
-    ]
+    Args:
+        json_data: Dictionary containing business report parameters
 
-    for option in advanced_options:
-        elem = ET.SubElement(advanced, option)
-        if option == 'SecondaryLastNameOption':
-            elem.text = name_data.get(option.lower(), 'OR')
-        else:
-            elem.text = str(name_data.get(option.lower(), 'false')).lower()
+    Returns:
+        str: XML string for business report request
+    """
+    # Validate permissible purpose if provided
+    if 'permissible_purpose' in json_data:
+        validate_permissible_purpose(**json_data['permissible_purpose'])
 
-    name_fields = ['LastName', 'FirstName', 'MiddleInitial', 'SecondaryLastName']
-    for field in name_fields:
-        elem = ET.SubElement(name_info, field)
-        elem.text = name_data.get(field.lower(), '')
+    # Load template
+    template = _load_template('business-report.xml')
 
+    # Flatten nested data for template interpolation
+    flat_data = _flatten_dict(json_data)
 
-def _add_business_name_info(parent: ET.Element, name_data: Dict[str, Any]) -> None:
-    """Add NameInfo section for business search."""
-    name_info = ET.SubElement(parent, 'NameInfo')
+    # Add default permissible purpose if not provided
+    if 'glb' not in flat_data:
+        flat_data['glb'] = 'I'
+    if 'dppa' not in flat_data:
+        flat_data['dppa'] = '6'
+    if 'voter' not in flat_data:
+        flat_data['voter'] = '7'
 
-    advanced = ET.SubElement(name_info, 'AdvancedNameSearch')
-    advanced_options = [
-        'LastSecondaryNameSoundSimilarOption',
-        'SecondaryLastNameOption',
-        'FirstNameSoundSimilarOption',
-        'FirstNameVariationsOption'
-    ]
-
-    for option in advanced_options:
-        elem = ET.SubElement(advanced, option)
-        if option == 'SecondaryLastNameOption':
-            elem.text = name_data.get(option.lower(), 'OR')
-        else:
-            elem.text = str(name_data.get(option.lower(), 'false')).lower()
-
-    name_fields = ['LastName', 'FirstName', 'MiddleInitial', 'SecondaryLastName']
-    for field in name_fields:
-        elem = ET.SubElement(name_info, field)
-        elem.text = name_data.get(field.lower(), '')
-
-
-def _add_address_info(parent: ET.Element, address_data: Dict[str, Any]) -> None:
-    """Add AddressInfo section."""
-    address_info = ET.SubElement(parent, 'AddressInfo')
-
-    sound_option = ET.SubElement(address_info, 'StreetNamesSoundSimilarOption')
-    sound_option.text = str(address_data.get('street_names_sound_similar_option', 'false')).lower()
-
-    address_fields = ['Street', 'City', 'State', 'County', 'ZipCode', 'Province', 'Country']
-    for field in address_fields:
-        elem = ET.SubElement(address_info, field)
-        elem.text = address_data.get(field.lower(), '')
-
-
-def _add_simple_fields(parent: ET.Element, data: Dict[str, Any]) -> None:
-    """Add simple fields like EmailAddress, NPINumber, SSN, etc."""
-    simple_fields = [
-        'EmailAddress',
-        'NPINumber',
-        'SSN',
-        'PhoneNumber',
-        'DriverLicenseNumber',
-        'WorldCheckUniqueId'
-    ]
-
-    for field in simple_fields:
-        elem = ET.SubElement(parent, field)
-        elem.text = data.get(field.lower(), '')
-
-    age_info = ET.SubElement(parent, 'AgeInfo')
-    age_fields = ['PersonBirthDate', 'PersonAgeTo', 'PersonAgeFrom']
-    for field in age_fields:
-        elem = ET.SubElement(age_info, field)
-        elem.text = data.get(field.lower(), '')
-
-    person_entity_id = ET.SubElement(parent, 'PersonEntityId')
-    person_entity_id.text = data.get('person_entity_id', '')
-
-
-def _add_datasources(root: ET.Element, datasources: Dict[str, Any]) -> None:
-    """Add Datasources section."""
-    datasources_elem = ET.SubElement(root, 'Datasources')
-
-    source_fields = ['PublicRecordPeople', 'NPIRecord', 'WorldCheckRiskIntelligence']
-    for field in source_fields:
-        elem = ET.SubElement(datasources_elem, field)
-        elem.text = str(datasources.get(field.lower(), 'true')).lower()
-
-
-def _xml_to_string(root: ET.Element) -> str:
-    """Convert XML element to properly formatted string."""
-    xml_str = ET.tostring(root, encoding='unicode', method='xml')
-
-    return f'<?xml version="1.0" encoding="UTF-8"?>\n{xml_str}'
+    # Interpolate template
+    return _safe_format_template(template, flat_data)

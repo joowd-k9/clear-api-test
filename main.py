@@ -1,12 +1,12 @@
-"""FastAPI application for Clear API Token Manager."""
+"""FastAPI application for Clear API"""
 
 import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
 import requests
-from fastapi import FastAPI, Response
+from fastapi import FastAPI
 from api.config import ENDPOINTS
 from api.token import Token
-from api.builder import build_business_search_xml
+from api.builder import build_business_search_xml, build_business_report_xml
 from api.parser import parse_business_search_response
 
 load_dotenv()
@@ -83,9 +83,19 @@ def search_business():
         timeout=30
     )
 
+    # Check if search request was successful
+    if response.status_code != 200:
+        print(f"Search request failed with status {response.status_code}: {response.text}")
+        return {"error": f"Search request failed with status {response.status_code}", "response": response.text}
+
     root = ET.fromstring(response.text)
     uri_element = root.find('.//Uri')
 
+    # Check if search was successful
+    if uri_element is None:
+        # Log the response for debugging
+        print(f"Search failed. Response: {response.text}")
+        return {"error": "Search failed - no URI found in response", "response": response.text}
 
     results_response = requests.get(
         uri_element.text,
@@ -103,85 +113,14 @@ def search_business():
 
     results_response = parse_business_search_response(results_response.text)
 
-    xmlbody = """
-<br:BusinessReportRequest xmlns:br="http://clear.thomsonreuters.com/api/report/2.0">
-  <PermissiblePurpose>
-    <GLB>See Appendix A: Permissible Use Definitions for acceptable values</GLB>
-    <DPPA>See Appendix A: Permissible Use Definitions for acceptable values</DPPA>
-    <VOTER>See Appendix A: Permissible Use Definitions for acceptable values</VOTER>
-  </PermissiblePurpose>
-  <Reference>S2S Business Report</Reference>
-  <Criteria>
-    <rc:ReportCriteria xmlns:rc="com/thomsonreuters/schemas/company-report">
-      <GroupID>{results_response["ResultGroup"]["GroupId"]}</GroupID>
-      <ReportChoice>Business</ReportChoice>
-      <ReportSections>
-        <BusinessOverviewSection>true</BusinessOverviewSection>
-        <PhoneNumberSection>true</PhoneNumberSection>
-        <BusinessSameAddressSection>true</BusinessSameAddressSection>
-        <PeopleSameAddressSection>true</PeopleSameAddressSection>
-        <PeopleSamePhoneSection>true</PeopleSamePhoneSection>
-        <BusinessSamePhoneSection>true</BusinessSamePhoneSection>
-        <FEINSection>true</FEINSection>
-        <FictitiousBusinessNameSection>true</FictitiousBusinessNameSection>
-        <ExecutiveAffiliationSection>true</ExecutiveAffiliationSection>
-        <BusinessContactRecordsSection>true</BusinessContactRecordsSection>
-        <ExecutiveProfileSection>true</ExecutiveProfileSection>
-        <CompanyProfileSection>true</CompanyProfileSection>
-        <AnnualFinancialsSection>true</AnnualFinancialsSection>
-        <FundamentalRatiosSection>true</FundamentalRatiosSection>
-        <MoneyServiceBusinessSection>true</MoneyServiceBusinessSection>
-        <DunBradstreetSection>true</DunBradstreetSection>
-        <DunBradstreetPCISection>true</DunBradstreetPCISection>
-        <WorldbaseSection>true</WorldbaseSection>
-        <CorporateSection>true</CorporateSection>
-        <BusinessProfileSection>true</BusinessProfileSection>
-        <GlobalSanctionSection>true</GlobalSanctionSection>
-        <ArrestSection>true</ArrestSection>
-        <CriminalSection>true</CriminalSection>
-        <ProfessionalLicenseSection>true</ProfessionalLicenseSection>
-        <WorldCheckSection>true</WorldCheckSection>
-        <InfractionSection>true</InfractionSection>
-        <LawsuitSection>true</LawsuitSection>
-        <LienJudgmentSection>true</LienJudgmentSection>
-        <DocketSection>true</DocketSection>
-        <FederalCaseLawSection>true</FederalCaseLawSection>
-        <StateCaseLawSection>true</StateCaseLawSection>
-        <BankruptcySection>true</BankruptcySection>
-        <RealPropertySection>true</RealPropertySection>
-        <PreForeclosureSection>true</PreForeclosureSection>
-        <BusinessContactSection>true</BusinessContactSection>
-        <UCCSection>true</UCCSection>
-        <SECFilingSection>true</SECFilingSection>
-        <RelatedSECFilingRecordSection>true</RelatedSECFilingRecordSection>
-        <OtherSecurityFilingRecordSection>true</OtherSecurityFilingRecordSection>
-        <AircraftSection>true</AircraftSection>
-        <VehicleSection>true</VehicleSection>
-        <WatercraftSection>true</WatercraftSection>
-        <NPISection>true</NPISection>
-        <HealthcareSanctionSection>true</HealthcareSanctionSection>
-        <ExcludedPartySection>true</ExcludedPartySection>
-        <AssociateAnalyticsChartSection>true</AssociateAnalyticsChartSection>
-        <QuickAnalysisFlagSection>true</QuickAnalysisFlagSection>
-        <NewsSection>false</NewsSection>
-        <WebAnalyticsSection>false</WebAnalyticsSection>
-        <MarijuanaRelatedBusinessesSection>true</MarijuanaRelatedBusinessesSection>
-        <NoMatchSections>true</NoMatchSections>
-      </ReportSections>
-      <IncludeArticles>
-        <NewsRecord>
-          <RecordId>Set NewsSection to true and use a RecordId from the same result as the GroupId.</RecordId>
-        </NewsRecord>
-        <WebAnalyticsRecord>
-          <RecordId>Set WebAnalyticsSection to true and use a RecordId from the same result as the GroupId.</RecordId>
-        </WebAnalyticsRecord>
-      </IncludeArticles>
-    </rc:ReportCriteria>
-  </Criteria>
-</br:BusinessReportRequest>
-    """
+    business_report_data = {
+        "reference": "S2S Business Report",
+        "group_id": results_response["ResultGroup"]["GroupId"]
+    }
 
-    report_response = requests.post(ENDPOINTS["business-report"], headers={
+    report_xml = build_business_report_xml(business_report_data)
+
+    report_response_obj = requests.post(ENDPOINTS["business-report"], headers={
         "Authorization": f"Bearer {token}",
         "Accept": "application/xml",
         "Content-Type": "application/xml",
@@ -190,10 +129,22 @@ def search_business():
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive"
-    }, data=xmlbody, timeout=30).text
+    }, data=report_xml, timeout=30)
+
+    # Check if report request was successful
+    if report_response_obj.status_code != 200:
+        print(f"Report request failed with status {report_response_obj.status_code}: {report_response_obj.text}")
+        return {"error": f"Report request failed with status {report_response_obj.status_code}", "response": report_response_obj.text}
+
+    report_response = report_response_obj.text
 
     xml_root = ET.fromstring(report_response)
     uri_element = xml_root.find('.//Uri')
+
+    # Check if report request was successful
+    if uri_element is None:
+        print(f"Report request failed. Response: {report_response}")
+        return {"error": "Report request failed - no URI found in response", "response": report_response}
 
     final_response = requests.get(uri_element.text, headers={
         "Authorization": f"Bearer {token}",

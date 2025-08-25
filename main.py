@@ -3,7 +3,7 @@
 import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from api.config import ENDPOINTS
 from api.token import Token
 from api.builder import build_business_search_xml, build_business_report_xml
@@ -143,4 +143,4 @@ def search_business():
         uri_element.text, headers=get_headers(content_type=None), timeout=30
     ).text
 
-    return parse_business_search_response(final_response)
+    return Response(final_response, media_type="application/xml")

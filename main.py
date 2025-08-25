@@ -3,10 +3,11 @@
 import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
 import requests
-from fastapi import FastAPI, Response
+from fastapi import FastAPI
 from api.config import ENDPOINTS
 from api.token import Token
 from api.builder import build_business_search_xml, build_business_report_xml
+from api.parser import parse_business_report_xml
 from models import BusinessSearchRequest
 
 load_dotenv()
@@ -126,4 +127,4 @@ async def search(business_data: BusinessSearchRequest):
         timeout=30,
     ).text
 
-    return Response(final_response, media_type="application/xml")
+    return parse_business_report_xml(final_response)

@@ -7,6 +7,7 @@ from fastapi import FastAPI, Response
 from api.config import ENDPOINTS
 from api.token import Token
 from api.builder import build_business_search_xml, build_business_report_xml
+from models import BusinessSearchRequest
 
 load_dotenv()
 
@@ -41,43 +42,15 @@ def read_root():
     return {"message": "Clear API Adapter", "version": "1.0.0"}
 
 
-@app.get("/search")
-def search():
-    """Search for a business."""
-    business_data = {
-        "reference": "S2S Business Search",
-        "company_entity_id": "",
-        "business_name": "Thomson Reuters",
-        "corporation_info": {
-            "corporation_id": "C1586596",
-            "filing_number": "",
-            "filing_date": "",
-            "fein": "133320829",
-            "duns_number": "147833446",
-        },
-        "npi_number": "",
-        "name_info": {
-            "last_name": "Bello",
-            "first_name": "Stephane",
-            "middle_initial": "",
-            "secondary_last_name": "",
-        },
-        "address_info": {
-            "street": "3 Times Square",
-            "city": "New York",
-            "state": "NY",
-            "county": "New York",
-            "zip_code": "10036",
-            "province": "",
-            "country": "",
-        },
-        "phone_number": "646-223-4000",
-    }
+@app.post("/search")
+async def search(business_data: BusinessSearchRequest):
+    """Search for a business using JSON body with Pydantic validation."""
+    business_data_dict = business_data.model_dump()
 
     search_response = requests.post(
         ENDPOINTS["business-search"],
         headers=get_headers(),
-        data=build_business_search_xml(business_data),
+        data=build_business_search_xml(business_data_dict),
         timeout=30,
     )
 

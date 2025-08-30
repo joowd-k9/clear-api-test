@@ -10,9 +10,18 @@ from api.builder import build_business_search_xml, build_business_report_xml
 from api.parser import parse_business_report_xml
 from models import BusinessSearchRequest
 
+import os
+import hashlib
+from diskcache import Cache
+
 load_dotenv()
 
 app = FastAPI(debug=True)
+
+# cache init
+CACHE_DIR = os.getenv("SEARCH_CACHE_DIR", os.path.join(os.path.expanduser("~"), ".clear_api_search_cache"))
+SEARCH_CACHE_TTL = int(os.getenv("SEARCH_CACHE_TTL", str(8 * 3600)))
+_search_cache = Cache(CACHE_DIR)
 
 
 def get_headers(content_type: str = "application/xml") -> dict:
@@ -89,6 +98,16 @@ async def search(business_data: BusinessSearchRequest):
             "response": search_results_response.text,
         }
 
+    # --- search results caching logic ---
+    results_text = search_results_response.text
+    results_key = "search_res:" + hashlib.sha256(results_text.encode("utf-8")).hexdigest()
+
+    cached = _search_cache.get(results_key)
+    if cached is not None:
+        # return cached parsed result immediately
+        return cached
+    # --- search results caching logic end ---
+
     business_report_data = {
         "reference": "S2S Business Report",
         "group_id": ET.fromstring(search_results_response.text).find(".//GroupId").text,
@@ -127,4 +146,9 @@ async def search(business_data: BusinessSearchRequest):
         timeout=30,
     ).text
 
-    return parse_business_report_xml(final_response)
+    parsed = parse_business_report_xml(final_response)
+
+    # store parsed result keyed by the search results content
+    _search_cache.set(results_key, parsed, expire=SEARCH_CACHE_TTL)
+
+    return parsed

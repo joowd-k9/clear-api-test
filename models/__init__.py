@@ -1,4 +1,9 @@
-# Models package
-from .business import BusinessSearchRequest
+"""Pydantic models for Clear API requests."""
 
-__all__ = ["BusinessSearchRequest"]
+from .business import BusinessSearchRequest
+from .permissible_purpose import PermissiblePurpose
+
+__all__ = [
+    "BusinessSearchRequest",
+    "PermissiblePurpose",
+]

@@ -1,5 +1,17 @@
-"""External integrations module."""
+"""External API integrations for processing engine."""
 
-from .base_client import BaseExternalAPIClient
+from .base_client import (
+    BaseExternalAPIClient,
+    APIClientError,
+    AuthenticationError,
+    RateLimitError,
+)
+from .clear_client import ClearAPIClient
 
-__all__ = ["BaseExternalAPIClient"]
+__all__ = [
+    "BaseExternalAPIClient",
+    "APIClientError",
+    "AuthenticationError",
+    "RateLimitError",
+    "ClearAPIClient",
+]

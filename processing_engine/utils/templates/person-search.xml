@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ps:PersonSearchRequest xmlns:ps="http://clear.thomsonreuters.com/api/search/3.0">
+    <PermissiblePurpose>
+        <GLB>{glb}</GLB>
+        <DPPA>{dppa}</DPPA>
+        <VOTER>{voter}</VOTER>
+    </PermissiblePurpose>
+    <Reference>{reference}</Reference>
+    <Criteria>
+        <p1:PersonCriteria xmlns:p1="com/thomsonreuters/schemas/search">
+            <NameInfo>
+                <AdvancedNameSearch>
+                    <LastSecondaryNameSoundSimilarOption>false</LastSecondaryNameSoundSimilarOption>
+                    <SecondaryLastNameOption>OR</SecondaryLastNameOption>
+                    <FirstNameSoundSimilarOption>false</FirstNameSoundSimilarOption>
+                    <FirstNameVariationsOption>false</FirstNameVariationsOption>
+                </AdvancedNameSearch>
+                <LastName>{last_name}</LastName>
+                <FirstName>{first_name}</FirstName>
+                <MiddleInitial>{middle_initial}</MiddleInitial>
+                <SecondaryLastName>{secondary_last_name}</SecondaryLastName>
+            </NameInfo>
+            <AddressInfo>
+                <StreetNamesSoundSimilarOption>false</StreetNamesSoundSimilarOption>
+                <Street>{street}</Street>
+                <City>{city}</City>
+                <State>{state}</State>
+                <County>{county}</County>
+                <ZipCode>{zip_code}</ZipCode>
+                <Province>{province}</Province>
+                <Country>{country}</Country>
+            </AddressInfo>
+        </p1:PersonCriteria>
+    </Criteria>
+    <Datasources>
+        <PublicRecordPerson>true</PublicRecordPerson>
+        <CriminalAndTrafficRecord>true</CriminalAndTrafficRecord>
+        <LienJudgmentRecord>true</LienJudgmentRecord>
+        <UCCRecord>true</UCCRecord>
+        <WorldCheckRiskIntelligence>true</WorldCheckRiskIntelligence>
+    </Datasources>
+</ps:PersonSearchRequest>

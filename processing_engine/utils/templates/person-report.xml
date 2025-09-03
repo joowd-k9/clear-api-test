@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pr:PersonReportRequest xmlns:pr="http://clear.thomsonreuters.com/api/report/3.0">
+    <PermissiblePurpose>
+        <GLB>{glb}</GLB>
+        <DPPA>{dppa}</DPPA>
+        <VOTER>{voter}</VOTER>
+    </PermissiblePurpose>
+    <Reference>{reference}</Reference>
+    <Criteria>
+        <GroupId>{group_id}</GroupId>
+    </Criteria>
+</pr:PersonReportRequest>

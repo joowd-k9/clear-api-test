@@ -1,25 +1,34 @@
 """FastAPI application for Clear API"""
 
+# Standard library imports
+import hashlib
+import os
 import xml.etree.ElementTree as ET
+from datetime import datetime
+
+# Third-party imports
 from dotenv import load_dotenv
 import requests
 from fastapi import FastAPI
+from diskcache import Cache
+
+# First-party imports
 from api.config import ENDPOINTS
 from api.token import Token
 from api.builder import build_business_search_xml, build_business_report_xml
 from api.parser import parse_business_report_xml
 from models import BusinessSearchRequest
-
-import os
-import hashlib
-from diskcache import Cache
+from processing_engine.processors.external_reports.clear_processor import ClearProcessor
+from processing_engine.models.execution import ProcessingResult
 
 load_dotenv()
 
 app = FastAPI(debug=True)
 
 # cache init
-CACHE_DIR = os.getenv("SEARCH_CACHE_DIR", os.path.join(os.path.expanduser("~"), ".clear_api_search_cache"))
+CACHE_DIR = os.getenv(
+    "SEARCH_CACHE_DIR", os.path.join(os.path.expanduser("~"), ".clear_api_search_cache")
+)
 SEARCH_CACHE_TTL = int(os.getenv("SEARCH_CACHE_TTL", str(8 * 3600)))
 _search_cache = Cache(CACHE_DIR)
 
@@ -50,6 +59,75 @@ def get_headers(content_type: str = "application/xml") -> dict:
 def read_root():
     """Return the root endpoint with API information."""
     return {"message": "Clear API Adapter", "version": "1.0.0"}
+
+
+@app.get("/test")
+def test_clear_processor():
+    """Test endpoint to execute CLEAR processor with sample data."""
+    exceptions = (Exception,)
+
+    try:
+        # Create sample underwriting ID
+        underwriting_id = "test_underwriting_001"
+
+        # Create mock ProcessingResult with application form data
+        sample_extraction_output = {
+            "stipulations": {
+                "business_name": "Acme Corporation",
+                "business_ein": "12-3456789",
+                "business_phone": "555-123-4567",
+                "business_address": "123 Main Street",
+                "business_city": "New York",
+                "business_state": "NY",
+                "business_zip": "10001",
+                "owner_first_name": "John",
+                "owner_last_name": "Doe",
+                "owner_middle_initial": "A",
+            },
+            "flags": {},
+            "risk_factors": {},
+        }
+
+        # Create ProcessingResult mock data
+        application_form_result = ProcessingResult(
+            underwriting_id=underwriting_id,
+            run_id="mock_run_001",
+            processor_name="p_application_form",
+            extraction_output=sample_extraction_output,
+            success=True,
+            timestamp=datetime.now(),
+            duration=100,
+            error=None,
+        )
+
+        # Initialize CLEAR processor
+        clear_processor = ClearProcessor(underwriting_id)
+
+        # Execute the processor
+        return clear_processor.execute(application_form_result)
+
+        return {
+            "status": "success",
+            "message": "CLEAR processor executed successfully",
+            "underwriting_id": underwriting_id,
+            "processor_result": {
+                "run_id": result.run_id,
+                "processor_name": result.processor_name,
+                "success": result.success,
+                "timestamp": result.timestamp.isoformat(),
+                "duration": result.duration,
+                "extraction_output": result.extraction_output,
+                "error": str(result.error) if result.error else None,
+            },
+            "note": "Authentication errors are expected without valid CLEAR API credentials",
+        }
+
+    except exceptions as e:
+        return {
+            "status": "error",
+            "message": f"Failed to execute CLEAR processor: {str(e)}",
+            "error_type": type(e).__name__,
+        }
 
 
 @app.post("/search")
@@ -100,7 +178,9 @@ async def search(business_data: BusinessSearchRequest):
 
     # --- search results caching logic ---
     results_text = search_results_response.text
-    results_key = "search_res:" + hashlib.sha256(results_text.encode("utf-8")).hexdigest()
+    results_key = (
+        "search_res:" + hashlib.sha256(results_text.encode("utf-8")).hexdigest()
+    )
 
     cached = _search_cache.get(results_key)
     if cached is not None:

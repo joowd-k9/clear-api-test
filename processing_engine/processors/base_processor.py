@@ -61,6 +61,7 @@ class BaseProcessor(ABC):
             )
 
         self.underwriting_id = underwriting_id
+        self.run_id = ""  # Initialize run_id, will be set properly in execute()
         self.logger = logging.getLogger(self.processor_name)
 
     @property
@@ -239,10 +240,7 @@ class BaseProcessor(ABC):
         for dependency in self.required_dependencies:
             if not any(dependency == name for name, _ in identifiers):
                 raise DependencyNotFoundError(
-                    self.run_id,
-                    self.processor_name,
-                    self.underwriting_id,
-                    dependency,
+                    self.run_id, self.processor_name, self.underwriting_id, dependency
                 )
 
         for dependency in self.all_dependencies:

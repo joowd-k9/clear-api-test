@@ -16,20 +16,19 @@ class DependencyNotFoundError(ProcessingEngineError):
 
     def __init__(
         self,
-        run_id: str,
-        processor_name: str,
-        underwriting_id: str,
-        dependency_name: str,
+        run_id: str | None = None,
+        processor_name: str | None = None,
+        underwriting_id: str | None = None,
+        dependency_name: str | None = None,
     ):
         self.run_id = run_id
         self.underwriting_id = underwriting_id
         self.processor_name = processor_name
         self.dependency_name = dependency_name
-        message = (
-            f"Dependency {dependency_name} not found for run_id: {run_id}, "
-            f"processor_name: {processor_name}, and underwriting_id: {underwriting_id}"
+        self.message = (
+            f"Dependency `{dependency_name}` not found for run_id: `{run_id}`, "
+            f"processor_name: `{processor_name}`, and underwriting_id: `{underwriting_id}`"
         )
-        super().__init__(message)
 
 
 class DependencyUnderwritingMismatchError(ProcessingEngineError):
@@ -39,17 +38,16 @@ class DependencyUnderwritingMismatchError(ProcessingEngineError):
 
     def __init__(
         self,
-        run_id: str,
-        processor_name: str,
-        underwriting_id: str,
-        dependency_name: str,
+        run_id: str | None = None,
+        processor_name: str | None = None,
+        underwriting_id: str | None = None,
+        dependency_name: str | None = None,
     ):
         self.run_id = run_id
         self.underwriting_id = underwriting_id
         self.processor_name = processor_name
         self.dependency_name = dependency_name
-        message = (
-            f"Dependency {dependency_name} received mismatches with the run_id: {run_id}, "
-            f"processor_name: {processor_name}, and underwriting_id: {underwriting_id}"
+        self.message = (
+            f"Dependency `{dependency_name}` received mismatches with the run_id: `{run_id}`, "
+            f"processor_name: `{processor_name}`, and underwriting_id: `{underwriting_id}`"
         )
-        super().__init__(message)

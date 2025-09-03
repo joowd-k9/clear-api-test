@@ -20,13 +20,28 @@ from datetime import datetime
 
 
 @dataclass
+class ExecutionContext:
+    """
+    Execution context containing metadata about the current processing run.
+
+    This provides a flexible container for execution-related information
+    that can be extended as needed without changing method signatures.
+    """
+
+    parent_run_id: str | None = None
+    previous_run_id: str | None = None
+    last_error_step: str | None = None
+    retry_count: int = 0
+    execution_metadata: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class ProcessorInput:
     """
     Processing input.
     """
 
     underwriting_id: str
-
 
 @dataclass
 class DocumentStipulation(ProcessorInput):
@@ -52,6 +67,7 @@ class ProcessingResult(ProcessorInput):
     processor_name: str
     extraction_output: dict[str, dict | str]
     success: bool
+    context: ExecutionContext = field(default_factory=ExecutionContext)
     timestamp: datetime = field(default_factory=datetime.now)
     duration: int = 0
-    error: Exception | None = None
+    error: dict[str, str] | None = None

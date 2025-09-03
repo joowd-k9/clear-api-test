@@ -13,6 +13,7 @@ from processing_engine.exceptions.base import (
 )
 from processing_engine.models.execution import (
     DocumentStipulation,
+    ExecutionContext,
     ProcessorInput,
     ProcessingResult,
 )
@@ -43,6 +44,7 @@ class BaseProcessor(ABC):
     ] = ()  # (p_driver_license, p_secretary_of_state, p_voided_check)
 
     run_id: str
+    context: ExecutionContext
     underwriting_id: str
 
     def __init__(self, underwriting_id: str):
@@ -61,7 +63,7 @@ class BaseProcessor(ABC):
             )
 
         self.underwriting_id = underwriting_id
-        self.run_id = ""  # Initialize run_id, will be set properly in execute()
+        self.context = ExecutionContext()  # Initialize with default context
         self.logger = logging.getLogger(self.processor_name)
 
     @property
@@ -97,7 +99,11 @@ class BaseProcessor(ABC):
         return f"p_{self.PROCESSOR_NAME}"
 
     @final
-    def execute(self, data: ProcessorInput | list[ProcessorInput]) -> ProcessingResult:
+    def execute(
+        self,
+        data: ProcessorInput | list[ProcessorInput],
+        context: ExecutionContext | None = None,
+    ) -> ProcessingResult:
         """
         Execute the main processing logic for the given underwriting id and data.
 
@@ -111,10 +117,17 @@ class BaseProcessor(ABC):
             DependencyNotFoundError: If any of the dependencies are not found
             DependencyUnderwritingMismatchError: If any of the dependencies are mismatched
         """
+        if context is not None:
+            self.context.parent_run_id = context.parent_run_id
+            self.context.previous_run_id = context.previous_run_id
+            self.context.last_error_step = context.last_error_step
+            self.context.retry_count = context.retry_count
+            self.context.execution_metadata.update(context.execution_metadata)
+
         self.run_id = str(uuid.uuid4())
         exceptions: tuple[Exception, ...] = (Exception,)
         pipeline = [
-            ("precheck", self._dependency_check),
+            ("dependency", self._dependency_check),
             ("validation", self._validate),
             ("processing", self._process),
             ("extraction", self._extract),
@@ -123,16 +136,25 @@ class BaseProcessor(ABC):
         result = data
 
         for step, function in pipeline:
+            # TODO: Implement reprocessing logic
+            # - Check if step should be skipped based on last_error_step
+            # - Skip completed steps, process from failure point
+            # - Only skip if ProcessorInput hash is the same as the previous run
+            #   otherwise reprocess from scratch
+
             try:
                 result = function(result)
             except exceptions as error:
                 self._handle_error(error, step)
+                # Update context with error information
+                self.context.last_error_step = step
                 return ProcessingResult(
-                    run_id=self.run_id,
                     underwriting_id=self.underwriting_id,
+                    run_id=self.run_id,
                     processor_name=self.processor_name,
                     extraction_output={},
                     success=False,
+                    context=self.context,
                     error={
                         "step": step,
                         "exception": error.__class__.__name__,
@@ -142,12 +164,15 @@ class BaseProcessor(ABC):
                     duration=int((datetime.now() - init).total_seconds() * 1000),
                 )
 
+        # TODO: Store the result in the database
+
         return ProcessingResult(
-            run_id=self.run_id,
             underwriting_id=self.underwriting_id,
+            run_id=self.run_id,
             processor_name=self.processor_name,
             extraction_output=result,
             success=True,
+            context=self.context,
             timestamp=init,
             duration=int((datetime.now() - init).total_seconds() * 1000),
         )

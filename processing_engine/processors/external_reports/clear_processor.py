@@ -25,7 +25,7 @@ class ClearProcessor(BaseProcessor):
     PROCESSOR_NAME: str = "clear_processor"
 
     REQUIRED_DEPENDENCIES: tuple[str, ...] = (
-        "p_application_forms",  # For business and owner information
+        "p_application_form",  # For business and owner information
     )
 
     def __init__(self, underwriting_id: str):

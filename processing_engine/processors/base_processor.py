@@ -133,7 +133,11 @@ class BaseProcessor(ABC):
                     processor_name=self.processor_name,
                     extraction_output={},
                     success=False,
-                    error=error,
+                    error={
+                        "step": step,
+                        "exception": error.__class__.__name__,
+                        "message": str(error),
+                    },
                     timestamp=init,
                     duration=int((datetime.now() - init).total_seconds() * 1000),
                 )
@@ -144,7 +148,6 @@ class BaseProcessor(ABC):
             processor_name=self.processor_name,
             extraction_output=result,
             success=True,
-            error=None,
             timestamp=init,
             duration=int((datetime.now() - init).total_seconds() * 1000),
         )

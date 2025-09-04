@@ -159,6 +159,7 @@ class BaseProcessor(ABC):
                         "step": step,
                         "exception": error.__class__.__name__,
                         "message": str(error),
+                        "payload": result,
                     },
                     timestamp=init,
                     duration=int((datetime.now() - init).total_seconds() * 1000),

@@ -7,6 +7,8 @@
 
 ## 1) Overview & Architecture
 
+**Note:** This document covers only the core execution engine for individual processors. It does not include orchestration, manual triggers, external integrations, or factor management systems.
+
 The processor execution system provides:
 
 - **Configurable Execution Strategies**: Sequential, Threaded, or Process-based execution via Runners

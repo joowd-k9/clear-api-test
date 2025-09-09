@@ -17,6 +17,34 @@ of a processor rather than the processor's static configuration.
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any, Literal
+
+
+@dataclass
+class ProcessorInput:
+    """
+    Processor input data.
+
+    Each input is given a unique `input_id` so it can be traced,
+    retried, or correlated with outputs and errors.
+
+    Attributes:
+        input_id (str): Unique identifier for this input.
+            - Useful for idempotency (detecting duplicate runs).
+            - Allows partial retries in batch processing.
+            - Enables fine-grained logging and auditing.
+        account_id (str): Identifier of the account the input belongs to.
+        underwriting_id (str): Identifier of the underwriting process
+            this input is tied to.
+        data (Any): The actual payload to be processed.
+        payload (Any): If the processor fails, this is the payload that failed.
+    """
+
+    input_id: str
+    account_id: str
+    underwriting_id: str
+    data: Any
+    payload: Any | None = None
 
 
 @dataclass
@@ -28,46 +56,49 @@ class ExecutionContext:
     that can be extended as needed without changing method signatures.
     """
 
+    trigger_type: Literal["manual", "automatic"] = "automatic"
+    trigger_initiator: str | None = None  # user:id or system
+    trigger_timestamp: datetime | None = None
     parent_run_id: str | None = None
     previous_run_id: str | None = None
     last_error_step: str | None = None
     retry_count: int = 0
     execution_metadata: dict[str, str] = field(default_factory=dict)
+    payloads: list[ProcessorInput | dict[str, str]] = field(default_factory=list)
+
+    def update(self, **kwargs):
+        """
+        Update the execution context with the given kwargs.
+        """
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
 
 @dataclass
-class ProcessorInput:
-    """
-    Processing input.
-    """
-
-    underwriting_id: str
-
-@dataclass
-class DocumentStipulation(ProcessorInput):
-    """
-    Represents a document used in underwriting or processing.
-    """
-
-    stipulation_name: str
-    document_title: str
-    content: bytes | str
-    mime_type: str
-    uploaded_at: datetime = field(default_factory=datetime.now)
-    source: str | None = None
-
-
-@dataclass
-class ProcessingResult(ProcessorInput):
+class ProcessingResult:
     """
     Processor's execution output.
+
+    Attributes:
+        run_id: The id of the current run
+        account_id: The id of the account the processor is running for
+        underwriting_id: The id of the underwriting the processor is running for
+        output: The output of the processor
+        success: Whether the processor execution was successful
+        context: The context of the current run
+        timestamp: The timestamp of the processor execution
+        duration: The duration of the processor execution
+        error: The error of the processor execution
+        payloads: The payloads of the processor execution if the processor failed
     """
 
     run_id: str
-    processor_name: str
-    extraction_output: dict[str, dict | str]
+    account_id: str
+    underwriting_id: str
+    output: list[dict[str, str]]
     success: bool
     context: ExecutionContext = field(default_factory=ExecutionContext)
     timestamp: datetime = field(default_factory=datetime.now)
     duration: int = 0
     error: dict[str, str] | None = None
+    payloads: list[ProcessorInput | dict[str, str]] | None = None

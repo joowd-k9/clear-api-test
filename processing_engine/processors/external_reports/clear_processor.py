@@ -1,8 +1,10 @@
 """Thomson Reuters CLEAR API processor for comprehensive background checks."""
 
+from asyncio.runners import Runner
 from typing import Any, Union
 
 from processing_engine.external_integrations.clear_client import ClearAPIClient
+from processing_engine.processors.runners import ProcessRunner
 from processing_engine.utils.xml_builder import XMLTemplateBuilder
 from processing_engine.utils.xml_parser import ClearXMLParser
 from processing_engine.models.clear_models import (
@@ -14,7 +16,7 @@ from processing_engine.models.clear_models import (
     Person,
     Address,
 )
-from processing_engine.models.execution import ProcessorInput, DocumentStipulation
+from processing_engine.models.execution import ProcessorInput
 
 from ..base_processor import BaseProcessor
 
@@ -24,13 +26,11 @@ class ClearProcessor(BaseProcessor):
 
     PROCESSOR_NAME: str = "clear_processor"
 
-    REQUIRED_DEPENDENCIES: tuple[str, ...] = (
-        "p_application_form",  # For business and owner information
-    )
-
-    def __init__(self, underwriting_id: str):
+    def __init__(
+        self, account_id: str, underwriting_id: str, runner: Runner = ProcessRunner()
+    ):
         """Initialize the CLEAR processor."""
-        super().__init__(underwriting_id)
+        super().__init__(account_id, underwriting_id, runner)
         self.clear_client = ClearAPIClient()
         self.xml_builder = XMLTemplateBuilder()
         self.xml_parser = ClearXMLParser()
@@ -45,7 +45,7 @@ class ClearProcessor(BaseProcessor):
         application_form = None
         for input_item in inputs:
             if (
-                isinstance(input_item, DocumentStipulation)
+                isinstance(input_item, ProcessorInput)
                 and input_item.stipulation_name == "s_application_form"
             ):
                 application_form = input_item
@@ -78,7 +78,7 @@ class ClearProcessor(BaseProcessor):
         application_form = None
         for input_item in data:
             if (
-                isinstance(input_item, DocumentStipulation)
+                isinstance(input_item, ProcessorInput)
                 and input_item.stipulation_name == "s_application_form"
             ):
                 application_form = input_item

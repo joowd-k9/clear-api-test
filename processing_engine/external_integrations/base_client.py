@@ -1,124 +1,67 @@
-"""Base client module for external integrations."""
+"""Base API client with rate limiting and authentication support."""
 
-import time
-import logging
-from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from abc import ABC
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from .auth_strategy import AuthStrategy
+from .rate_limiter import RateLimiter
 
 
-class APIClientError(Exception):
-    """Base exception for API client errors."""
+class BaseApiClient(ABC):
+    """
+    Base client for external APIs with pluggable authentication
+    and optional rate limiting.
+    """
 
+    BASE_URL: str
 
-class AuthenticationError(APIClientError):
-    """Exception raised when authentication fails."""
-
-
-class RateLimitError(APIClientError):
-    """Exception raised when rate limit is exceeded."""
-
-
-class BaseExternalAPIClient(ABC):
-    """Base client class for external integrations with retry, rate limiting, and error handling."""
-
-    def __init__(self, credentials: Dict[str, Any], timeout: int = 30):
-        """Initialize the client with credentials and configuration."""
-        self.credentials = credentials
-        self.timeout = timeout
-        self.logger = logging.getLogger(self.__class__.__name__)
-
-        # Setup session with retry strategy
-        self.session = requests.Session()
-        retry_strategy = Retry(
-            total=3,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "POST"],
-            backoff_factor=1,
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
-
-        # Rate limiting
-        self._last_request_time = 0
-        self._min_request_interval = 0.1  # 100ms between requests
-
-    @abstractmethod
-    def authenticate(self) -> str:
-        """Authenticate with the external service and return access token."""
-
-    def _enforce_rate_limit(self) -> None:
-        """Enforce rate limiting between requests."""
-        current_time = time.time()
-        time_since_last_request = current_time - self._last_request_time
-
-        if time_since_last_request < self._min_request_interval:
-            sleep_time = self._min_request_interval - time_since_last_request
-            time.sleep(sleep_time)
-
-        self._last_request_time = time.time()
-
-    def _get_headers(self) -> Dict[str, str]:
-        """Get the headers for API requests."""
-        try:
-            token = self.authenticate()
-            return {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/xml",
-                "Accept": "application/xml",
-            }
-        except Exception as e:
-            raise AuthenticationError(f"Failed to authenticate: {str(e)}") from e
-
-    def make_request(
+    def __init__(
         self,
-        method: str,
-        url: str,
-        data: Optional[str] = None,
-        headers: Optional[Dict[str, str]] = None,
-    ) -> requests.Response:
-        """Make an authenticated HTTP request with error handling."""
-        self._enforce_rate_limit()
+        auth_strategy: AuthStrategy | None = None,
+        timeout: int = 30,
+        rate_limiter: RateLimiter | None = None,
+    ):
+        self.base_url = self.BASE_URL.rstrip("/")
+        self.auth_strategy = auth_strategy
+        self.session = requests.Session()
+        self.timeout = timeout
+        self.rate_limiter = rate_limiter
 
-        request_headers = self._get_headers()
-        if headers:
-            request_headers.update(headers)
+        if self.auth_strategy:
+            self.auth_strategy.apply(self.session)
 
-        try:
-            self.logger.debug("Making %s request to %s", method, url)
-            response = self.session.request(
-                method=method,
-                url=url,
-                data=data,
-                headers=request_headers,
-                timeout=self.timeout,
-            )
+    def _full_url(self, path: str) -> str:
+        return f"{self.base_url}/{path.lstrip('/')}"
 
-            # Handle rate limiting
-            if response.status_code == 429:
-                retry_after = int(response.headers.get("Retry-After", 60))
-                self.logger.warning("Rate limited. Waiting %d seconds", retry_after)
-                time.sleep(retry_after)
-                return self.make_request(method, url, data, headers)
+    def _request(self, method: str, path: str, **kwargs):
+        if self.rate_limiter:
+            self.rate_limiter.acquire()
 
-            response.raise_for_status()
-            return response
+        url = self._full_url(path)
+        response = self.session.request(method, url, timeout=self.timeout, **kwargs)
+        return self._handle_response(response)
 
-        except requests.exceptions.RequestException as e:
-            self.logger.error("Request failed: %s", str(e))
-            raise APIClientError(f"Request failed: {str(e)}") from e
-
-    def post(
-        self, url: str, data: str, headers: Optional[Dict[str, str]] = None
-    ) -> requests.Response:
-        """Make a POST request."""
-        return self.make_request("POST", url, data, headers)
-
-    def get(
-        self, url: str, headers: Optional[Dict[str, str]] = None
-    ) -> requests.Response:
+    def get(self, path: str, **kwargs):
         """Make a GET request."""
-        return self.make_request("GET", url, headers=headers)
+        return self._request("GET", path, **kwargs)
+
+    def post(self, path: str, **kwargs):
+        """Make a POST request."""
+        return self._request("POST", path, **kwargs)
+
+    def put(self, path: str, **kwargs):
+        """Make a PUT request."""
+        return self._request("PUT", path, **kwargs)
+
+    def delete(self, path: str, **kwargs):
+        """Make a DELETE request."""
+        return self._request("DELETE", path, **kwargs)
+
+    def _handle_response(self, response):
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            raise RuntimeError(f"API request failed: {e}") from e
+        try:
+            return response.json()
+        except ValueError:
+            return response.text

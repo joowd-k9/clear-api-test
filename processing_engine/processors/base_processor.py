@@ -12,6 +12,7 @@ from processing_engine.models.execution import (
     ExecutionContext,
     ProcessorInput,
     ProcessingResult,
+    CostEntry,
 )
 from processing_engine.exceptions.execution import PrevalidationError
 from processing_engine.processors.runners import (
@@ -51,6 +52,7 @@ class BaseProcessor(ABC):
     run_id: str
     account_id: str
     underwriting_id: str
+    _cost_tracker: list[CostEntry]
 
     def __init__(
         self,
@@ -70,6 +72,7 @@ class BaseProcessor(ABC):
         self.runner = runner
         self.context = ExecutionContext()
         self.logger = logging.getLogger(self.PROCESSOR_NAME)
+        self._cost_tracker: list[CostEntry] = []
 
     @property
     def processor_name(self) -> str:
@@ -77,6 +80,99 @@ class BaseProcessor(ABC):
         Get the processor name.
         """
         return f"p_{self.PROCESSOR_NAME}"
+
+    def base_cost(self) -> float:
+        """
+        Get the base cost of the processor.
+        """
+        return 0.0
+
+    def track_cost(
+        self, 
+        service: str, 
+        operation: str, 
+        cost: float, 
+        metadata: dict[str, Any] | None = None
+    ) -> None:
+        """
+        Track a cost entry for API calls or processing activities.
+        
+        Args:
+            service: The service name (e.g., 'experian', 'clear', 'ocr')
+            operation: The operation performed (e.g., 'credit_report', 'business_search')
+            cost: The cost of the operation
+            metadata: Additional metadata about the operation
+        """
+        entry = CostEntry(
+            service=service,
+            operation=operation,
+            cost=cost,
+            metadata=metadata or {}
+        )
+        self._cost_tracker.append(entry)
+        
+        self.logger.debug(
+            f"Cost tracked: {service}.{operation} = ${cost:.4f}",
+            extra={
+                "run_id": getattr(self, "run_id", None),
+                "account_id": self.account_id,
+                "underwriting_id": self.underwriting_id,
+                "service": service,
+                "operation": operation,
+                "cost": cost,
+                "metadata": metadata
+            }
+        )
+
+    def get_total_cost(self) -> float:
+        """
+        Calculate the total cost including base cost and tracked costs.
+        
+        Returns:
+            Total cost for this processor execution
+        """
+        tracked_cost = sum(entry.cost for entry in self._cost_tracker)
+        return self.base_cost() + tracked_cost
+
+    def get_cost_breakdown(self) -> dict[str, Any]:
+        """
+        Get detailed cost breakdown.
+        
+        Returns:
+            Dictionary with cost breakdown by service and operation
+        """
+        breakdown = {
+            "base_cost": self.base_cost(),
+            "tracked_costs": {},
+            "total_tracked": 0.0,
+            "total_cost": 0.0
+        }
+        
+        # Group costs by service and operation
+        for entry in self._cost_tracker:
+            if entry.service not in breakdown["tracked_costs"]:
+                breakdown["tracked_costs"][entry.service] = {}
+            
+            if entry.operation not in breakdown["tracked_costs"][entry.service]:
+                breakdown["tracked_costs"][entry.service][entry.operation] = {
+                    "count": 0,
+                    "total_cost": 0.0,
+                    "entries": []
+                }
+            
+            service_op = breakdown["tracked_costs"][entry.service][entry.operation]
+            service_op["count"] += 1
+            service_op["total_cost"] += entry.cost
+            service_op["entries"].append({
+                "cost": entry.cost,
+                "timestamp": entry.timestamp.isoformat(),
+                "metadata": entry.metadata
+            })
+        
+        breakdown["total_tracked"] = sum(entry.cost for entry in self._cost_tracker)
+        breakdown["total_cost"] = self.get_total_cost()
+        
+        return breakdown
 
     @final
     def execute(
@@ -182,6 +278,19 @@ class BaseProcessor(ABC):
         results = self.runner.run(lambda i: run(i.input_id, i.data), data.values())
         success = all(r["success"] for r in results)
 
+        # Calculate costs after processing is complete
+        cost_breakdown = self._calculate_cost(ProcessingResult(
+            run_id=self.run_id,
+            account_id=self.account_id,
+            underwriting_id=self.underwriting_id,
+            success=success,
+            output=self._aggregate_results(results) if success else results,
+            context=self.context,
+            timestamp=init,
+            duration=int((datetime.now() - init).total_seconds() * 1000),
+            payloads=payloads(results) if not success else None,
+        ))
+
         return ProcessingResult(
             run_id=self.run_id,
             account_id=self.account_id,
@@ -192,6 +301,7 @@ class BaseProcessor(ABC):
             timestamp=init,
             duration=int((datetime.now() - init).total_seconds() * 1000),
             payloads=payloads(results) if not success else None,
+            cost_breakdown=cost_breakdown,
         )
 
     @abstractmethod
@@ -294,6 +404,18 @@ class BaseProcessor(ABC):
             )
 
         return unique_data
+
+    def _calculate_cost(self, result: ProcessingResult) -> dict[str, float|dict]:
+        """
+        Calculate the cost of the run.
+
+        Args:
+            result: The result to calculate the cost of the run
+
+        Returns:
+            The cost of the run with detailed breakdown
+        """
+        return self.get_cost_breakdown()
 
     def _aggregate_results(self, results: list[dict[str, str]]) -> dict[str, str]:
         """

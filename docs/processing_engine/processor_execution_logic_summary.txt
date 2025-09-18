@@ -1,0 +1,536 @@
+================================================================================
+                    PROCESSOR EXECUTION LOGIC V2 - SUMMARY REPORT
+================================================================================
+
+DOCUMENT: processor_execution_logic_v2.md
+SCOPE: BaseProcessor with Runner-based execution
+PURPOSE: Define processor run execution with configurable strategies and retry mechanisms
+
+================================================================================
+1. OVERVIEW & ARCHITECTURE
+================================================================================
+
+The processor execution system provides configurable execution strategies for
+individual processors with intelligent retry logic and comprehensive error handling.
+
+KEY CAPABILITIES:
+• Configurable Execution Strategies: Sequential, Threaded, or Process-based execution via Runners
+• Intelligent Retry Logic: Smart step skipping based on previous failures
+• Parallel Processing: Multiple inputs can be processed concurrently
+• Comprehensive Error Handling: Detailed error tracking with step-level granularity
+
+CORE COMPONENTS:
+1. BaseProcessor: Core processing logic with pipeline execution
+2. Runner: Execution strategy abstraction (Sequential, Thread, Process)
+3. ExecutionContext: Retry lineage and metadata tracking
+4. ProcessorInput: Individual input items with unique identifiers
+5. ProcessingResult: Execution outcome with detailed error information
+
+================================================================================
+2. EXECUTION PIPELINE
+================================================================================
+
+PROCESSING PIPELINE STRUCTURE:
+```
+input prevalidation → [3-step pipeline] → result aggregation
+```
+
+3-STEP PIPELINE (executed by runners):
+```
+validation → processing → extraction
+```
+
+STEP RESPONSIBILITIES:
+• Input Prevalidation: Checks if account_id and underwriting_id match the processor's
+  account_id and underwriting_id (pre-pipeline)
+• _validate(data): Input validation and structure verification (pipeline step 1)
+• _process(data): Core business logic transformation (pipeline step 2)
+• _extract(data): Factor extraction and result formatting (pipeline step 3)
+• Result Aggregation: Merges the output factors from each input into a single
+  result set (post-pipeline)
+
+EXECUTION FLOW:
+1. Start: execute() - Begin processing
+2. Prevalidate Input List - Check account_id and underwriting_id match
+3. Setup Fixed 3 step Pipeline - validation → processing → extraction
+4. Use Configured Runner - Runner is initialized at processor instantiation
+5. Runner Processes Each Input - Execute pipeline on each input
+6. For Each Input: Check Resume Point from Payload - Determine where to start
+7. For Each Input: Execute Pipeline Steps from Resume Point - Run validation/processing/extraction
+8. Runner Collects All Results - Gather all input results
+9. Check: All Inputs Success? - Determine overall success
+10. If Success: Aggregate Results - Merge output factors from all inputs
+11. If Failure: Preserve Individual Results - Keep separate results for failed inputs
+12. Return Result - Success result with aggregated output or Error result with payloads
+13. End - Processing complete
+
+INPUT PROCESSING STRATEGY:
+The Runner processes multiple ProcessorInput items as follows:
+1. Input List: The processor receives a list of ProcessorInput objects
+2. Input Prevalidation: All inputs are prevalidated to ensure account_id and
+   underwriting_id match the processor's configuration
+3. Runner Delegation: The runner takes each prevalidated input and applies the processing function
+4. Individual Processing: Each input is processed independently with its own:
+   - Resume point (from its payload)
+   - Pipeline execution (validation → processing → extraction)
+   - Success/failure result
+5. Result Collection: The runner executes the processing function against each input
+   and returns a list of individual results
+
+EXAMPLE WITH 3 INPUTS:
+```
+Input List: [doc1, doc2, doc3]
+↓
+Runner processes each:
+- doc1 → validation → processing → extraction → SUCCESS
+- doc2 → validation → processing → FAIL (retry from processing)
+- doc3 → SKIP validation → processing → extraction → SUCCESS
+↓
+Results: [
+    (doc1, success, output),
+    (doc2, failed, failed_payload),
+    (doc3, success, output),
+]
+```
+
+================================================================================
+3. RUNNER SYSTEM
+================================================================================
+
+The Runner system provides configurable execution strategies for processing multiple inputs.
+
+RUNNER INTERFACE:
+```python
+class Runner(ABC):
+    @abstractmethod
+    def run(
+        self,
+        func: Callable[[Any], Any],
+        inputs: Iterable[Any],
+    ) -> list[dict[str, Any]]:
+        """Execute function against inputs and return ordered results."""
+```
+
+AVAILABLE RUNNERS:
+
+1. SEQUENTIAL RUNNER
+   • Strategy: Processes inputs one by one in the same thread
+   • Use Case: Simple processing, debugging, or when order matters
+   • Performance: Slower but predictable and easy to debug
+
+2. THREAD RUNNER
+   • Strategy: Uses ThreadPoolExecutor for concurrent execution
+   • Use Case: I/O-bound operations, external API calls
+   • Performance: Good for I/O-bound tasks, limited by GIL for CPU-bound
+
+3. PROCESS RUNNER
+   • Strategy: Uses ProcessPoolExecutor for true parallel execution
+   • Use Case: CPU-intensive processing, data transformation
+   • Performance: Best for CPU-bound tasks, true parallelism
+
+RUNNER SELECTION GUIDE:
+┌─────────────────┬─────────────────┬─────────────────────────────┐
+│ Scenario        │ Recommended     │ Reason                      │
+├─────────────────┼─────────────────┼─────────────────────────────┤
+│ Debugging/Dev   │ Sequential      │ Easy to debug, predictable  │
+│ External APIs   │ Thread          │ I/O-bound, good concurrency │
+│ File Processing │ Thread          │ File I/O operations         │
+│ Data Transform  │ Process         │ CPU-intensive calculations  │
+│ Small datasets  │ Sequential      │ Overhead not worth it       │
+│ Large datasets  │ Process         │ Better resource utilization │
+└─────────────────┴─────────────────┴─────────────────────────────┘
+
+RUNNER SELECTION PROCESS:
+The runner is selected during processor initialization and can be configured
+based on the workload:
+
+```python
+# Runner selection during processor creation
+processor = MyProcessor(
+    account_id="acc_123",
+    underwriting_id="uw_456",
+    runner=SequentialRunner()  # or ThreadRunner(), ProcessRunner()
+)
+```
+
+================================================================================
+4. RETRY & RESUME LOGIC
+================================================================================
+
+CORE PRINCIPLES:
+1. Step Skipping: Skip successfully completed steps on retry
+2. Failure Point Resume: Resume from the exact failure point
+3. Payload Preservation: Maintain intermediate results for retry
+
+RETRY FLOW:
+1. Retry Execution for Failed Inputs
+2. Check ExecutionContext has previous_run_id?
+3. If No: Full Processing of All Inputs
+4. If Yes: Check Input Payloads for Resume Points
+5. Determine Resume Point based on error step from payload
+6. Execute Pipeline from Resume Point
+7. Return Results
+
+STEP SKIPPING LOGIC:
+┌─────────────────┬─────────────────┬─────────────────────────────┐
+│ Previous Error  │ Skipped Steps   │ Resume Point                │
+├─────────────────┼─────────────────┼─────────────────────────────┤
+│ validation      │ None            │ Start at validation         │
+│ processing      │ validation      │ Start at processing         │
+│ extraction      │ validation,     │ Start at extraction         │
+│                 │ processing      │                             │
+└─────────────────┴─────────────────┴─────────────────────────────┘
+
+RETRY CONTEXT MANAGEMENT:
+The system uses ExecutionContext to track retry information:
+
+```python
+class ExecutionContext:
+    parent_run_id: str | None = None      # Original run ID
+    previous_run_id: str | None = None    # Last failed run ID
+    last_error_step: str | None = None    # Step that failed
+    retry_count: int = 0                  # Number of retries
+    execution_metadata: dict[str, str]    # Additional context
+```
+
+RESUME LOGIC IMPLEMENTATION:
+The system checks the payload attribute of each ProcessorInput to determine
+where to resume:
+
+```python
+def _get_resume_step(self, input_item: ProcessorInput) -> str:
+    """Determine which step to resume from based on input payload."""
+    if not input_item.payload or not isinstance(input_item.payload, dict):
+        return "validation"  # Start from beginning
+
+    # Resume from the step that failed previously
+    failed_step = input_item.payload.get("step")
+    return failed_step if failed_step else "validation"
+```
+
+RESUME BEHAVIOR:
+• If payload.step is "validation" → Start at validation
+• If payload.step is "processing" → Start at processing (skip validation)
+• If payload.step is "extraction" → Start at extraction (skip validation & processing)
+• If no payload or step → Start at validation (full processing)
+
+================================================================================
+5. EXECUTION EXAMPLES
+================================================================================
+
+EXAMPLE 1: SUCCESSFUL EXECUTION
+Input: 3 documents to process
+```
+Input 1: document.pdf → validation → processing → extraction → SUCCESS
+Input 2: statement.pdf → validation → processing → extraction → SUCCESS
+Input 3: license.pdf → validation → processing → extraction → SUCCESS
+```
+Result: All inputs processed successfully, aggregated results returned.
+
+EXAMPLE 2: PARTIAL FAILURE WITH RETRY
+Initial Execution:
+```
+Input 1: document.pdf → validation → processing → extraction → FAIL (extraction error)
+Input 2: statement.pdf → validation → processing → extraction → SUCCESS
+Input 3: license.pdf → validation → processing → extraction → SUCCESS
+```
+
+Retry Execution (Input 1 payload: step="extraction"):
+```
+Input 1: document.pdf → SKIP validation → SKIP processing → extraction → SUCCESS
+Input 2: statement.pdf → SKIP (already successful)
+Input 3: license.pdf → SKIP (already successful)
+```
+
+EXAMPLE 3: PROCESSING STEP FAILURE
+Initial Execution:
+```
+Input 1: document.pdf → validation → processing → FAIL (processing error)
+Input 2: statement.pdf → validation → processing → extraction → SUCCESS
+```
+
+Retry with Payload:
+```
+Input 1 payload: step="processing", retry_count=1
+Input 1: document.pdf → SKIP validation → processing → extraction → SUCCESS
+Input 2: statement.pdf → SKIP (already successful)
+```
+
+EXAMPLE 4: VALIDATION STEP FAILURE
+Initial Execution:
+```
+Input 1: document.pdf → validation → FAIL (validation error)
+Input 2: statement.pdf → validation → processing → extraction → SUCCESS
+```
+
+Retry with Payload:
+```
+Input 1 payload: step="validation", retry_count=1
+Input 1: document.pdf → validation → processing → extraction → SUCCESS
+Input 2: statement.pdf → SKIP (already successful)
+```
+
+================================================================================
+6. ERROR HANDLING & RECOVERY
+================================================================================
+
+ERROR RESPONSE FORMAT:
+```json
+{
+    "input_id": "doc_123",
+    "success": false,
+    "step": "extraction",
+    "exception": "ValidationError",
+    "message": "Invalid document format",
+    "payload": {
+        "step": "extraction",
+        "exception": "ValidationError",
+        "message": "Invalid document format",
+        "data": "processed_data_here"
+    }
+}
+```
+
+ERROR RECOVERY STRATEGIES:
+┌─────────────────┬─────────────────┬─────────────────────────────┐
+│ Error Type      │ Recovery        │ Example                     │
+├─────────────────┼─────────────────┼─────────────────────────────┤
+│ Validation      │ Retry from      │ Invalid document format     │
+│ Error           │ validation step │                             │
+│ Processing      │ Retry from      │ API timeout during          │
+│ Error           │ processing step │ processing                  │
+│ Extraction      │ Retry from      │ Factor calculation failure  │
+│ Error           │ extraction step │                             │
+└─────────────────┴─────────────────┴─────────────────────────────┘
+
+PAYLOAD PRESERVATION:
+When a step fails, the system preserves:
+• Current state: Data at the point of failure
+• Step information: Which step failed
+• Error details: Exception type and message
+• Retry context: Information needed for resume
+
+================================================================================
+7. PERFORMANCE CONSIDERATIONS
+================================================================================
+
+RUNNER PERFORMANCE CHARACTERISTICS:
+┌─────────────────┬─────────────┬─────────────┬─────────────────┬─────────────────┐
+│ Runner Type     │ CPU Bound   │ I/O Bound   │ Memory Usage    │ Startup Overhead│
+├─────────────────┼─────────────┼─────────────┼─────────────────┼─────────────────┤
+│ Sequential      │ Poor        │ Poor        │ Low             │ None            │
+│ Thread          │ Poor (GIL)  │ Good        │ Medium          │ Low             │
+│ Process         │ Excellent   │ Good        │ High            │ High            │
+└─────────────────┴─────────────┴─────────────┴─────────────────┴─────────────────┘
+
+OPTIMIZATION GUIDELINES:
+1. Choose Appropriate Runner: Match runner to workload type
+2. Batch Size: Balance parallelism with resource usage
+3. Error Handling: Minimize retry overhead with smart skipping
+4. Memory Management: ProcessRunner uses more memory per worker
+
+MONITORING METRICS:
+• Execution Time: Per input and total duration
+• Success Rate: Percentage of successful inputs
+• Retry Rate: Frequency of retries needed
+• Step Performance: Time spent in each pipeline step
+• Runner Efficiency: Throughput per runner type
+
+================================================================================
+8. IMPLEMENTATION DETAILS
+================================================================================
+
+BASEPROCESSOR.EXECUTE() METHOD:
+```python
+def execute(
+    self,
+    data: list[ProcessorInput],
+    context: ExecutionContext | None = None,
+) -> ProcessingResult:
+    """
+    Execute processing pipeline with configurable runner strategy.
+
+    Args:
+        data: List of inputs to process
+        context: Optional retry context for resume logic
+
+    Returns:
+        ProcessingResult with success/failure and detailed error info
+    """
+```
+
+KEY IMPLEMENTATION FEATURES:
+1. Prevalidation: Ensures all inputs belong to same account/underwriting
+2. Pipeline Definition: 3-step pipeline (validation → processing → extraction)
+   with pre/post processing
+3. Runner Integration: Delegates execution to configured runner
+4. Error Isolation: Each input processed independently
+5. Result Aggregation: Combines results from all inputs
+
+CONTEXT MANAGEMENT:
+```python
+# Context merging for retry scenarios
+if context is not None:
+    for key, value in context.__dict__.items():
+        setattr(self.context, key, value)
+```
+
+================================================================================
+9. USAGE EXAMPLES
+================================================================================
+
+BASIC USAGE:
+```python
+# Create processor with sequential execution
+processor = MyProcessor(
+    account_id="acc_123",
+    underwriting_id="uw_456",
+    runner=SequentialRunner()
+)
+
+# Process multiple inputs
+inputs = [
+    ProcessorInput(
+        input_id="doc_1",
+        account_id="acc_123",
+        underwriting_id="uw_456",
+        data=document_data
+    ),
+    # ... more inputs
+]
+
+result = processor.execute(inputs)
+```
+
+RETRY WITH CONTEXT:
+```python
+# Retry with previous context
+retry_context = ExecutionContext(
+    parent_run_id="original_run_id",
+    previous_run_id="failed_run_id",
+    last_error_step="extraction",
+    retry_count=1
+)
+
+result = processor.execute(inputs, context=retry_context)
+```
+
+PARALLEL PROCESSING:
+```python
+# Use thread runner for I/O-bound tasks
+processor = MyProcessor(
+    account_id="acc_123",
+    underwriting_id="uw_456",
+    runner=ThreadRunner(max_workers=4)
+)
+
+result = processor.execute(inputs)
+```
+
+================================================================================
+10. IMPLEMENTATION GUIDELINES
+================================================================================
+
+PROCESSOR DEVELOPMENT CHECKLIST:
+• Define Required Attributes: Set PROCESSOR_NAME and implement abstract methods
+• Choose Runner Strategy: Select appropriate runner based on workload type
+• Implement Pipeline Steps: Create _validate, _process, and _extract methods
+• Test with Different Runners: Ensure compatibility across execution strategies
+• Validate Input Processing: Test with various input scenarios and edge cases
+
+CODE STRUCTURE REQUIREMENTS:
+```python
+class MyProcessor(BaseProcessor):
+    PROCESSOR_NAME = "my_processor"
+
+    def __init__(self, account_id: str, underwriting_id: str, runner: Runner = SequentialRunner()):
+        super().__init__(account_id, underwriting_id, runner)
+
+    def _validate(self, data: Any) -> Any:
+        # Input validation logic
+        pass
+
+    def _process(self, data: Any) -> Any:
+        # Core processing logic
+        pass
+
+    def _extract(self, data: Any) -> dict[str, str | list | dict]:
+        # Factor extraction logic
+        pass
+```
+
+================================================================================
+11. BEST PRACTICES
+================================================================================
+
+RUNNER SELECTION:
+• Start with SequentialRunner for development and debugging
+• Use ThreadRunner for I/O-bound operations (API calls, file processing)
+• Use ProcessRunner for CPU-intensive tasks (data transformation, calculations)
+• Profile performance to validate runner choice
+
+ERROR HANDLING:
+• Implement idempotent operations in all pipeline steps
+• Handle transient errors with appropriate retry strategies
+• Log detailed error information for debugging
+• Use structured error responses for consistent handling
+
+PERFORMANCE OPTIMIZATION:
+• Batch similar operations when possible
+• Monitor resource usage with different runner configurations
+• Implement circuit breakers for external service calls
+• Cache intermediate results to avoid recomputation
+
+TESTING:
+• Test with different runner types to ensure compatibility
+• Test retry scenarios with various failure points
+• Test input change detection with modified data
+• Test error recovery with different error types
+
+================================================================================
+12. TROUBLESHOOTING
+================================================================================
+
+COMMON ISSUES:
+┌─────────────────┬─────────────────┬─────────────────────────────┐
+│ Issue           │ Cause           │ Solution                    │
+├─────────────────┼─────────────────┼─────────────────────────────┤
+│ Memory usage    │ ProcessRunner   │ Use ThreadRunner or reduce │
+│ high            │ with large      │ batch size                 │
+│                 │ inputs          │                             │
+│ Slow execution  │ Wrong runner    │ Profile and choose         │
+│                 │ for workload    │ appropriate runner          │
+│ Retry not       │ Context not     │ Ensure context is properly │
+│ working         │ passed correctly│ constructed                 │
+│ Partial         │ Input validation│ Check input data format    │
+│ failures        │ issues          │ and validation logic       │
+└─────────────────┴─────────────────┴─────────────────────────────┘
+
+DEBUGGING TIPS:
+1. Use SequentialRunner for debugging to maintain order
+2. Enable detailed logging to track execution flow
+3. Check error payloads for failure point information
+4. Monitor resource usage during execution
+5. Test with small datasets first before scaling
+
+================================================================================
+13. SUMMARY
+================================================================================
+
+The processor execution system provides a robust, configurable framework for
+executing processing pipelines with intelligent retry logic and comprehensive
+error handling. Key features include:
+
+• CONFIGURABLE EXECUTION: Three runner strategies optimized for different workloads
+• INTELLIGENT RETRY: Smart step skipping based on previous failures
+• PARALLEL PROCESSING: Multiple inputs processed concurrently when appropriate
+• COMPREHENSIVE ERROR HANDLING: Detailed error tracking with step-level granularity
+• PERFORMANCE OPTIMIZATION: Runner selection based on workload characteristics
+
+The system is designed for reliability, performance, and maintainability,
+providing a solid foundation for processor implementations in the AURA
+underwriting system.
+
+================================================================================
+END OF REPORT
+================================================================================

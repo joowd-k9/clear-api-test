@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from processing_engine.processors.runners import (
     Runner,
-    SequentialRunner,
+    DefaultRunner,
     ThreadRunner,
     ProcessRunner,
 )
@@ -35,9 +35,9 @@ class TestRunnerBasics:
         with pytest.raises(TypeError, match="Can't instantiate abstract class"):
             Runner()
 
-    def test_sequential_runner_basic(self):
-        """Test SequentialRunner basic functionality."""
-        runner = SequentialRunner()
+    def test_default_runner_basic(self):
+        """Test DefaultRunner basic functionality."""
+        runner = DefaultRunner()
         inputs = [1, 2, 3]
         results = runner.run(simple_square, inputs)
 
@@ -72,43 +72,43 @@ class TestRunnerBasics:
         """Test that all runners produce the same results."""
         inputs = [1, 2, 3, 4, 5]
 
-        sequential_runner = SequentialRunner()
+        default_runner = DefaultRunner()
         thread_runner = ThreadRunner(max_workers=2)
         process_runner = ProcessRunner(max_workers=2)
 
-        sequential_results = sequential_runner.run(simple_square, inputs)
+        default_results = default_runner.run(simple_square, inputs)
         thread_results = thread_runner.run(simple_square, inputs)
         process_results = process_runner.run(simple_square, inputs)
 
         # All should produce identical results
-        assert sequential_results == thread_results == process_results
+        assert default_results == thread_results == process_results
 
     def test_empty_inputs(self):
         """Test all runners with empty inputs."""
-        sequential_runner = SequentialRunner()
+        default_runner = DefaultRunner()
         thread_runner = ThreadRunner(max_workers=2)
         process_runner = ProcessRunner(max_workers=2)
 
-        sequential_results = sequential_runner.run(simple_square, [])
+        default_results = default_runner.run(simple_square, [])
         thread_results = thread_runner.run(simple_square, [])
         process_results = process_runner.run(simple_square, [])
 
-        assert sequential_results == []
+        assert default_results == []
         assert thread_results == []
         assert process_results == []
 
     def test_single_input(self):
         """Test all runners with single input."""
-        sequential_runner = SequentialRunner()
+        default_runner = DefaultRunner()
         thread_runner = ThreadRunner(max_workers=2)
         process_runner = ProcessRunner(max_workers=2)
 
-        sequential_results = sequential_runner.run(simple_identity, [42])
+        default_results = default_runner.run(simple_identity, [42])
         thread_results = thread_runner.run(simple_identity, [42])
         process_results = process_runner.run(simple_identity, [42])
 
         expected = [{"value": 42}]
-        assert sequential_results == expected
+        assert default_results == expected
         assert thread_results == expected
         assert process_results == expected
 

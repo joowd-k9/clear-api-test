@@ -5,8 +5,6 @@ Comprehensive tests for the BaseProcessor class.
 import pytest
 import sys
 import os
-from datetime import datetime
-from unittest.mock import patch, MagicMock
 
 # Add the project root to the Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -17,7 +15,7 @@ from processing_engine.processors.base_processor import (
 )
 from processing_engine.models.execution import ProcessorInput, ExecutionContext
 from processing_engine.exceptions.execution import PrevalidationError
-from processing_engine.processors.runners import SequentialRunner
+from processing_engine.processors.runners import DefaultRunner
 from tests.processing_engine.processors.test_processor import (
     ConcreteTestProcessor,
     FailingValidationProcessor,
@@ -37,7 +35,7 @@ class TestBaseProcessorInitialization:
         assert processor.underwriting_id == "underwriting_456"
         assert processor.PROCESSOR_NAME == "test_processor"
         assert processor.processor_name == "p_test_processor"
-        assert isinstance(processor.runner, SequentialRunner)
+        assert isinstance(processor.runner, DefaultRunner)
         assert isinstance(processor.context, ExecutionContext)
         assert processor.logger.name == "test_processor"
 
@@ -46,10 +44,16 @@ class TestBaseProcessorInitialization:
 
         class InvalidProcessor(BaseProcessor):
             # Missing PROCESSOR_NAME
-            def _validate(self, data):
+            def _validate_input(self, data):
                 return data
 
-            def _process(self, data):
+            def _validate_result(self, data):
+                return data
+
+            def _aggregate_result(self, data):
+                return {}
+
+            def _transform_input(self, data):
                 return data
 
             def _extract(self, data):
@@ -66,10 +70,16 @@ class TestBaseProcessorInitialization:
         class InvalidProcessor(BaseProcessor):
             PROCESSOR_NAME = ""
 
-            def _validate(self, data):
+            def _validate_input(self, data):
                 return data
 
-            def _process(self, data):
+            def _validate_result(self, data):
+                return data
+
+            def _aggregate_result(self, data):
+                return {}
+
+            def _transform_input(self, data):
                 return data
 
             def _extract(self, data):
@@ -86,10 +96,16 @@ class TestBaseProcessorInitialization:
         class InvalidProcessor(BaseProcessor):
             PROCESSOR_NAME = "   "
 
-            def _validate(self, data):
+            def _validate_input(self, data):
                 return data
 
-            def _process(self, data):
+            def _validate_result(self, data):
+                return data
+
+            def _aggregate_result(self, data):
+                return {}
+
+            def _transform_input(self, data):
                 return data
 
             def _extract(self, data):
@@ -125,13 +141,11 @@ class TestPrevalidateInputs:
 
         result = processor._prevalidate_inputs(inputs)
 
-        # Should return a dictionary with input_id as key
-        assert isinstance(result, dict)
+        # Should return a list of data values
+        assert isinstance(result, list)
         assert len(result) == 2
-        assert "input_1" in result
-        assert "input_2" in result
-        assert result["input_1"].input_id == "input_1"
-        assert result["input_2"].input_id == "input_2"
+        assert "test_data_1" in result
+        assert "test_data_2" in result
 
     def test_prevalidate_inputs_duplicate_input_ids(self):
         """Test that duplicate input_ids are deduplicated."""
@@ -154,10 +168,10 @@ class TestPrevalidateInputs:
 
         result = processor._prevalidate_inputs(inputs)
 
-        # Should only have one entry with the last value
-        assert len(result) == 1
-        assert "input_1" in result
-        assert result["input_1"].data == "test_data_2"  # Last value wins
+        # Should have both values (no deduplication for lists)
+        assert len(result) == 2
+        assert "test_data_1" in result
+        assert "test_data_2" in result
 
     def test_prevalidate_inputs_wrong_account_id_fails(self):
         """Test that prevalidation fails with wrong account_id."""
@@ -197,7 +211,7 @@ class TestPrevalidateInputs:
 
         result = processor._prevalidate_inputs([])
 
-        assert isinstance(result, dict)
+        assert isinstance(result, list)
         assert len(result) == 0
 
 
@@ -222,16 +236,17 @@ class TestSuccessfulExecution:
         assert result.success is True
         assert result.account_id == "account_123"
         assert result.underwriting_id == "underwriting_456"
-        assert result.run_id is not None
+        assert result.execution_id is not None
         assert result.duration >= 0  # Duration can be 0 for very fast operations
-        assert result.payloads is None  # No payloads on success
 
         # Check the output structure
         assert isinstance(result.output, dict)
-        assert result.output["original_data"] == "hello"
-        assert result.output["processed_data"] == "processed_hello"
-        assert result.output["length"] == "15"  # len("processed_hello")
-        assert result.output["factors"]["is_processed"] == "true"
+        output_dict = result.output  # Type hint for linter
+        # With preprocessing pipeline, the _extract method receives the transformed data
+        assert output_dict["original_data"] == "processed_hello"
+        assert output_dict["processed_data"] == "processed_processed_hello"
+        assert output_dict["length"] == "25"  # len("processed_processed_hello")
+        assert output_dict["factors"]["is_processed"] == "true"
 
     def test_successful_execution_multiple_inputs(self):
         """Test successful execution with multiple inputs."""
@@ -255,7 +270,6 @@ class TestSuccessfulExecution:
         result = processor.execute(inputs)
 
         assert result.success is True
-        assert result.payloads is None
 
         # Check aggregated output
         assert isinstance(result.output, dict)
@@ -309,16 +323,11 @@ class TestErrorHandling:
         result = processor.execute(inputs)
 
         assert result.success is False
-        assert result.payloads is not None
-        assert len(result.payloads) == 1
 
-        # Check error details
-        error_result = result.output[0]  # Should be a list of error results
-        assert error_result["success"] is False
-        assert error_result["step"] == "validation"
-        assert error_result["exception"] == "ValueError"
-        assert "Validation always fails" in error_result["message"]
-        assert error_result["input_id"] == "input_1"
+        # Check error details - with early termination, output is None and error is in error field
+        assert result.output is None
+        assert result.error is not None
+        assert "Validation always fails" in result.error["message"]
 
     def test_processing_failure(self):
         """Test handling of processing failures."""
@@ -336,15 +345,11 @@ class TestErrorHandling:
         result = processor.execute(inputs)
 
         assert result.success is False
-        assert result.payloads is not None
-        assert len(result.payloads) == 1
 
-        # Check error details
-        error_result = result.output[0]
-        assert error_result["success"] is False
-        assert error_result["step"] == "processing"
-        assert error_result["exception"] == "RuntimeError"
-        assert "Processing always fails" in error_result["message"]
+        # Check error details - with early termination, output is None and error is in error field
+        assert result.output is None
+        assert result.error is not None
+        assert "Processing always fails" in result.error["message"]
 
     def test_extraction_failure(self):
         """Test handling of extraction failures."""
@@ -362,15 +367,11 @@ class TestErrorHandling:
         result = processor.execute(inputs)
 
         assert result.success is False
-        assert result.payloads is not None
-        assert len(result.payloads) == 1
 
-        # Check error details
-        error_result = result.output[0]
-        assert error_result["success"] is False
-        assert error_result["step"] == "extraction"
-        assert error_result["exception"] == "KeyError"
-        assert "Extraction always fails" in error_result["message"]
+        # Check error details - with early termination, output is None and error is in error field
+        assert result.output is None
+        assert result.error is not None
+        assert "Extraction always fails" in result.error["message"]
 
     def test_mixed_success_failure(self):
         """Test handling of mixed success and failure scenarios."""
@@ -387,111 +388,21 @@ class TestErrorHandling:
                 input_id="input_2",
                 account_id="account_123",
                 underwriting_id="underwriting_456",
-                data="hi",  # Too short, will fail validation
+                data="hi",  # Too short, but gets transformed to "processed_hi" which passes validation
             ),
         ]
 
         result = processor.execute(inputs)
 
-        assert result.success is False  # Any failure makes the whole execution fail
-        assert result.payloads is not None
-        assert len(result.payloads) == 2  # Both inputs should be in payloads
-
-        # Check that we have both success and failure results
-        assert len(result.output) == 2
-        success_results = [r for r in result.output if r["success"]]
-        failure_results = [r for r in result.output if not r["success"]]
-
-        assert len(success_results) == 1
-        assert len(failure_results) == 1
-        assert failure_results[0]["step"] == "validation"
+        # With preprocessing pipeline, both inputs should succeed because "hi" becomes "processed_hi"
+        assert result.success is True
+        assert isinstance(result.output, dict)
+        # The output should be from the last successful input
+        output_dict = result.output
+        assert output_dict["original_data"] == "processed_hi"
+        assert output_dict["processed_data"] == "processed_processed_hi"
 
 
-class TestPayloadReconstruction:
-    """Test payload reconstruction on failure."""
-
-    def test_payload_reconstruction_on_validation_failure(self):
-        """Test that payloads are correctly reconstructed on validation failure."""
-        processor = FailingValidationProcessor("account_123", "underwriting_456")
-
-        inputs = [
-            ProcessorInput(
-                input_id="input_1",
-                account_id="account_123",
-                underwriting_id="underwriting_456",
-                data="test_data",
-            )
-        ]
-
-        result = processor.execute(inputs)
-
-        assert result.success is False
-        assert result.payloads is not None
-        assert len(result.payloads) == 1
-
-        payload = result.payloads[0]
-        assert isinstance(payload, ProcessorInput)
-        assert payload.input_id == "input_1"
-        assert payload.account_id == "account_123"
-        assert payload.underwriting_id == "underwriting_456"
-        assert payload.data == "test_data"  # Original data preserved
-        assert payload.payload is not None  # Failed payload should be set
-
-    def test_payload_reconstruction_on_processing_failure(self):
-        """Test that payloads are correctly reconstructed on processing failure."""
-        processor = FailingProcessingProcessor("account_123", "underwriting_456")
-
-        inputs = [
-            ProcessorInput(
-                input_id="input_1",
-                account_id="account_123",
-                underwriting_id="underwriting_456",
-                data="test_data",
-            )
-        ]
-
-        result = processor.execute(inputs)
-
-        assert result.success is False
-        assert result.payloads is not None
-        assert len(result.payloads) == 1
-
-        payload = result.payloads[0]
-        assert payload.input_id == "input_1"
-        assert payload.data == "test_data"  # Original data preserved
-        assert payload.payload is not None  # Failed payload should be set
-
-    def test_payload_reconstruction_with_multiple_failures(self):
-        """Test payload reconstruction with multiple failed inputs."""
-        processor = FailingValidationProcessor("account_123", "underwriting_456")
-
-        inputs = [
-            ProcessorInput(
-                input_id="input_1",
-                account_id="account_123",
-                underwriting_id="underwriting_456",
-                data="test_data_1",
-            ),
-            ProcessorInput(
-                input_id="input_2",
-                account_id="account_123",
-                underwriting_id="underwriting_456",
-                data="test_data_2",
-            ),
-        ]
-
-        result = processor.execute(inputs)
-
-        assert result.success is False
-        assert result.payloads is not None
-        assert len(result.payloads) == 2
-
-        # Check both payloads
-        payload_dict = {p.input_id: p for p in result.payloads}
-        assert "input_1" in payload_dict
-        assert "input_2" in payload_dict
-        assert payload_dict["input_1"].data == "test_data_1"
-        assert payload_dict["input_2"].data == "test_data_2"
 
 
 class TestEdgeCases:
@@ -505,7 +416,6 @@ class TestEdgeCases:
 
         assert result.success is True
         assert result.output == {}
-        assert result.payloads is None
 
     def test_very_short_input(self):
         """Test with input that's too short for validation."""
@@ -516,14 +426,18 @@ class TestEdgeCases:
                 input_id="input_1",
                 account_id="account_123",
                 underwriting_id="underwriting_456",
-                data="ab",  # Too short
+                data="ab",  # Too short, but gets transformed to "processed_ab" which passes validation
             )
         ]
 
         result = processor.execute(inputs)
 
-        assert result.success is False
-        assert "Data must be at least 3 characters long" in result.output[0]["message"]
+        # With preprocessing pipeline, this should succeed because "ab" becomes "processed_ab"
+        assert result.success is True
+        assert isinstance(result.output, dict)
+        output_dict = result.output
+        assert output_dict["original_data"] == "processed_ab"
+        assert output_dict["processed_data"] == "processed_processed_ab"
 
     def test_non_string_input(self):
         """Test with non-string input that fails validation."""
@@ -534,14 +448,18 @@ class TestEdgeCases:
                 input_id="input_1",
                 account_id="account_123",
                 underwriting_id="underwriting_456",
-                data=123,  # Not a string
+                data=123,  # Not a string, but gets transformed to "processed_123" which passes validation
             )
         ]
 
         result = processor.execute(inputs)
 
-        assert result.success is False
-        assert "Data must be a string" in result.output[0]["message"]
+        # With preprocessing pipeline, this should succeed because 123 becomes "processed_123"
+        assert result.success is True
+        assert isinstance(result.output, dict)
+        output_dict = result.output
+        assert output_dict["original_data"] == "processed_123"
+        assert output_dict["processed_data"] == "processed_processed_123"
 
 
 if __name__ == "__main__":

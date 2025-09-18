@@ -12,19 +12,19 @@ class ProcessorExecutionError(ProcessingEngineError):
 
     def __init__(
         self,
-        run_id: str | None = None,
+        execution_id: str | None = None,
         account_id: str | None = None,
         underwriting_id: str | None = None,
         processor_name: str | None = None,
         message: str | None = None,
     ):
-        self.run_id = run_id
+        self.execution_id = execution_id
         self.account_id = account_id
         self.underwriting_id = underwriting_id
         self.processor_name = processor_name
         self.message = (
             f"Processor execution failed:\n"
-            f"run_id: `{run_id}`\n "
+            f"execution_id: `{execution_id}`\n "
             f"account_id: `{account_id}`\n "
             f"underwriting_id: `{underwriting_id}`\n "
             f"processor_name: `{processor_name}`" + (f"\n{message}" if message else "")

@@ -27,16 +27,29 @@ A **processor run** is an individual attempt to execute a specific processor wit
 ## Cost Structure
 
 #### Processor Base Costs
-Processors are stored in the database with their pricing information. Some configurations, including pricing, may also be stored in configuration files. Each processor may have a base cost or be zero. Base costs are retrieved from the database or configuration files and can be updated without code changes. 
+Processors are stored in the database with their pricing information. Some configurations, including pricing, may also be stored in configuration files. Each processor may have a base cost or be free. Base costs are retrieved from the database or configuration files and can be updated without code changes.
 
-Processor base costs are incurred only once per execution, regardless of how many times that processor type runs within the same execution.
+Just for the sake of example, here are some possible charging patterns:
+
+*Example 1 - Per Execution:* (used in examples below)
+- Run 1: Test Processor - Base cost: $0.10 (charged)
+- Run 2: Test Processor (manual re-process) - Base cost: $0.00 (already charged)
+
+*Example 2 - Per Run:*
+- Run 1: Test Processor - Base cost: $0.10 (charged)
+- Run 2: Test Processor (manual re-process) - Base cost: $0.10 (charged again)
+
+*Example 3 - Per Execution Per Run Per Input:*
+- Run 1: Test Processor (input A) - Base cost: $0.10 (charged)
+- Run 2: Test Processor (input A re-process) - Base cost: $0.00 (same execution, same input)
+- Run 3: Test Processor (input B) - Base cost: $0.10 (charged - different input)
 
 #### External API Costs
-External APIs like CLEAR, Experian, and Equifax incur costs per API 
+External APIs like CLEAR, Experian, and Equifax incur costs per API
 call. Different services have different cost structures.
 
 #### Processing Costs
-Some processors might have processing costs (e.g., OCR, data transformation). These costs are determined by business rules implemented within each individual processor. 
+Some processors might have processing costs (e.g., OCR, data transformation). These costs are determined by business rules implemented within each individual processor.
 
 #### Caching Strategy
 If results are from cached data, additional API or processing costs could be skipped. The system should track whether costs were avoided due to caching.
@@ -55,27 +68,28 @@ If results are from cached data, additional API or processing costs could be ski
 2. Input Prevalidation
    └── Pre-validate account/underwriting IDs
 
-3. Processing Pipeline
+3. Processing Pipeline (called n times for each items in input list)
    ├── Validation Step
    │   ├── Validate business rules
    │   └── Check data completeness
    ├── Processing Step
-   │   ├── Check cache for existing results
-   │   ├── Make external API calls if needed 
-   │   ├── Do heavy processing if needed
-   │   ├── Cache successful outputs if needed
-   │   └── Track costs for each operation
+   │   ├── Check cache for existing results        # if applicable
+   │   ├── Make external API calls                 # if applicable
+   │   ├── Do heavy processing                     # if applicable
+   │   ├── Cache successful outputs                # if applicable
+   │   └── Track costs for each operation          # if applicable
    └── Extraction Step
        ├── Extract factors from processed data
        └── Format output according to schema
 
-4. Result Aggregation
-   ├── Combine extracted factors from all inputs
+4. Post Processing
+   ├── Run custom business logic costs tracking (for this run if needed).
+   ├── Result Aggregation Combine extracted factors from all inputs
    └── Prepare final output structure
 
 5. Cost Calculation
    ├── Sum all tracked costs for this run
-   ├── Add base cost only if first run of this processor type in execution
+   ├── Add base cost according to configured business logic
    ├── Generate cost breakdown for this run
    └── Include in processing result
 
@@ -84,60 +98,32 @@ If results are from cached data, additional API or processing costs could be ski
    └── Update execution history with run results
 ```
 
-### External API Call Flow with Exception Handling
+### External API Call Flow
 
 ```
 1. Execution Start
+   ├── New underwriting request
    └── Begin processing
 
 2. Run 1: API Call Preparation
    ├── Generate cache key from parameters
    ├── Check cache for existing result
-   └── If cached: return result with $0.00 cost
+   └── If cached: return result with $0.00 cost (base cost may still apply per business logic)
 
 3. Run 1: First API Attempt
    ├── Track cost: $0.50 (Processor Base Cost)
    ├── Make HTTP request to external API
    ├── Handle response
-   └── If success: cache result and return
+   ├── Track cost: $0.75 x 2 (if there are two external API calls)
+   ├── Cache each successful result
+   ├── Run 1 ends with success
+   └── Return ProcessingResult with success status
 
-4. Run 1: Exception Occurs (if first attempt fails)
-   ├── Track cost: $0.50 (attempted call)
-   ├── Log error with metadata
-   ├── Run 1 ends with failure
-   └── Return ProcessingResult with failure status
-
-5. Run 2: Retry (New Run within Same Execution)
-   ├── New run created within same execution
-   ├── Track cost: $0.50 (retry attempt)
-   ├── Make HTTP request again
-   ├── Handle response
-   └── If success: cache result and return
-
-6. Run 2: Exception Occurs (if retry fails)
-   ├── Track cost: $0.50 (retry attempt)
-   ├── Log error with metadata
-   ├── Run 2 ends with failure
-   └── Return ProcessingResult with failure status
-
-7. Run 3: Final Retry (New Run within Same Execution)
-   ├── New run created within same execution
-   ├── Track cost: $0.50 (final attempt)
-   ├── Make HTTP request again
-   ├── Handle response
-   └── If success: cache result and return
-
-8. Run 3: Final Failure
-   ├── Track cost: $0.50 (final attempt)
-   ├── Log final error
-   ├── All runs failed
-   └── Raise ProcessorExecutionError
-
-9. Execution Cost Summary
-   ├── Total runs: 3
-   ├── Total cost: $1.50
-   ├── Cache status: Not cached (failed)
-   └── Execution status: Failed
+4. Execution Cost Summary
+   ├── Total runs: 1 (successful)
+   ├── Total cost: $2 ($0.50 base + $0.75 API x 2)
+   ├── Cache status: Cached (successful result)
+   └── Execution status: Success
 ```
 
 ### Multi Processor Execution Flow
@@ -151,29 +137,12 @@ If results are from cached data, additional API or processing costs could be ski
    ├── Base cost: $0.10 (charged once per processor type per execution)
    ├── Check cache: Miss
    ├── API call: Success
-   ├── Track cost: $0.75 (business search)
+   ├── Track cost: $0.75 x 2 (person search x 2)
    ├── Cache result
-   ├── Run cost: $0.75
+   ├── Run cost: $0.75 x 2
    └── Return ProcessingResult
 
-3. Run 2: Experian Processor
-   ├── Base cost: $0.10 (charged once per processor type per execution)
-   ├── Check cache: Miss
-   ├── API call: Success
-   ├── Track cost: $0.50 (business credit report)
-   ├── Cache result
-   ├── Run cost: $0.50
-   └── Return ProcessingResult
-
-4. Run 3: Equifax Processor
-   ├── Base cost: $0.10 (charged once per processor type per execution)
-   ├── Check cache: Hit (from previous execution)
-   ├── Track cost: $0.00 (cached result)
-   ├── Use cached data
-   ├── Run cost: $0.00
-   └── Return ProcessingResult
-
-5. Run 4: Bank Statement Processor
+3. Run 2: Bank Statement Processor
    ├── Base cost: $0.10 (charged once per processor type per execution)
    ├── Process document
    ├── Track cost: $2.50 (document processing - 5 pages @ $0.50/page)
@@ -181,50 +150,22 @@ If results are from cached data, additional API or processing costs could be ski
    ├── Run cost: $2.50
    └── Return ProcessingResult
 
-6. Run 5: Manual Re-execution - Clear Processor
-   ├── Base cost: $0.00 (already charged in Run 1)
+4. Run 3: Manual Re-execution - Clear Processor
+   ├── Base cost: $0.00 (already charged in Run 1 - per execution model)
    ├── Check cache: Hit (from Run 1)
    ├── Track cost: $0.00 (cached result)
    ├── Use cached data
    ├── Run cost: $0.00
    └── Return ProcessingResult
 
-7. Execution Summary
-   ├── Total processor runs: 5
-   ├── Successful processor runs: 5
+5. Execution Summary (per execution)
+   ├── Total processor runs: 3
+   ├── Successful processor runs: 3
    ├── Failed processor runs: 0
-   ├── Total tracked cost: $3.75
-   ├── Total base cost: $0.40 (4 unique processor types × $0.10 each)
-   ├── Total execution cost: $4.15
+   ├── Total tracked cost: $4.00
+   ├── Total base cost: $0.20 (2 unique processor types × $0.10 each)
+   ├── Total execution cost: $4.20
    └── Execution status: Success
-```
-
-### Exception Handling Flow
-
-```
-1. Run 1: API Call Failure
-   ├── Track cost: $0.50 (attempted call)
-   ├── Log error with metadata
-   ├── Run 1 ends with failure
-   └── Return ProcessingResult with failure status
-
-2. Run 2: Retry Processing (New Run within Same Execution)
-   ├── New run created within same execution
-   ├── Track cost: $0.50 (retry attempt)
-   ├── Make API call again
-   └── If success: return result
-
-3. Run 3: Final Retry Failure
-   ├── Track cost: $0.50 (final attempt)
-   ├── Log final error
-   ├── All runs failed
-   └── Raise ProcessorExecutionError
-
-4. Execution Cost Accumulation
-   ├── Each run tracks its own costs
-   ├── Total cost = Sum of all run costs within execution
-   ├── Metadata includes run attempt number
-   └── Billing system receives cumulative costs
 ```
 
 ### Cache Hit Flow
@@ -267,49 +208,54 @@ This example shows cost breakdown entries from the Multi Processor Execution Flo
             "processor_name": "clear_processor",
             "base_cost": 0.10,
             "tracked_costs": {
-                "clear": {
-                    "business_search": {
-                        "count": 1,
-                        "total_cost": 0.75,
-                        "entries": [
-                            {
-                                "cost": 0.75,
-                                "timestamp": "2024-01-01T12:00:00",
-                                "metadata": {
-                                    "business_name": "Example Corp",
-                                    "cached": false,
-                                    "cache_hit": false,
-                                    "run_number": 1
-                                }
+                "person_search": {
+                    "count": 2,
+                    "total_cost": 1.50,
+                    "entries": [
+                        {
+                            "cost": 0.75,
+                            "timestamp": "2024-01-01T12:00:00",
+                            "metadata": {
+                                "person_name": "Example Person 1",
+                                "cached": false,
+                                "cache_hit": false,
+                                "run_number": 1
                             }
-                        ]
-                    }
+                        },
+                        {
+                            "cost": 0.75,
+                            "timestamp": "2024-01-01T12:00:05",
+                            "metadata": {
+                                "person_name": "Example Person 2",
+                                "cached": false,
+                                "cache_hit": false,
+                                "run_number": 1
+                            }
+                        }
+                    ]
                 }
             },
-            "total_tracked": 0.75
+            "total_tracked": 1.50
         },
-        //...
         {
             "run_number": 4,
             "processor_name": "bank_statement_processor",
             "base_cost": 0.10,
             "tracked_costs": {
-                "processing": {
-                    "document_processing": {
-                        "count": 1,
-                        "total_cost": 2.50,
-                        "entries": [
-                            {
-                                "cost": 2.50,
-                                "timestamp": "2024-01-01T12:15:00",
-                                "metadata": {
-                                    "pages_processed": 5,
-                                    "cost_per_page": 0.50,
-                                    "run_number": 4
-                                }
+                "document_processing": {
+                    "count": 1,
+                    "total_cost": 2.50,
+                    "entries": [
+                        {
+                            "cost": 2.50,
+                            "timestamp": "2024-01-01T12:15:00",
+                            "metadata": {
+                                "pages_processed": 5,
+                                "cost_per_page": 0.50,
+                                "run_number": 4
                             }
-                        ]
-                    }
+                        }
+                    ]
                 }
             },
             "total_tracked": 2.50
@@ -319,32 +265,40 @@ This example shows cost breakdown entries from the Multi Processor Execution Flo
             "processor_name": "clear_processor",
             "base_cost": 0.00,
             "tracked_costs": {
-                "clear": {
-                    "business_search": {
-                        "count": 1,
-                        "total_cost": 0.00,
-                        "entries": [
-                            {
-                                "cost": 0.00,
-                                "timestamp": "2024-01-01T12:20:00",
-                                "metadata": {
-                                    "business_name": "Example Corp",
-                                    "cached": true,
-                                    "cache_hit": true,
-                                    "run_number": 5
-                                }
+                "person_search": {
+                    "count": 2,
+                    "total_cost": 0.00,
+                    "entries": [
+                        {
+                            "cost": 0.00,
+                            "timestamp": "2024-01-01T12:20:00",
+                            "metadata": {
+                                "person_name": "Example Person 1",
+                                "cached": true,
+                                "cache_hit": true,
+                                "run_number": 5
                             }
-                        ]
-                    }
+                        },
+                        {
+                            "cost": 0.00,
+                            "timestamp": "2024-01-01T12:20:00",
+                            "metadata": {
+                                "person_name": "Example Person 2",
+                                "cached": true,
+                                "cache_hit": true,
+                                "run_number": 5
+                            }
+                        }
+                    ]
                 }
             },
             "total_tracked": 0.00
         }
     ],
     "cumulative_costs": {
-        "total_base_cost": 0.40,
-        "total_tracked_cost": 3.75,
-        "total_cost": 4.15
+        "total_base_cost": 0.20,
+        "total_tracked_cost": 4.00,
+        "total_cost": 4.20
     }
 }
 ```
@@ -376,7 +330,7 @@ This example shows cost breakdown entries from the Multi Processor Execution Flo
    - Cache pricing information for performance
    - Handle missing pricing gracefully (default to $0.00)
    - Support dynamic pricing updates without code changes
-   - **Processor base costs are charged only once per execution per processor type**
+   - **Processor base costs follow configurable business logic patterns (per execution, per run, etc.)**
 
 2. **Cost Configuration**
    - Store API costs in configuration files or database

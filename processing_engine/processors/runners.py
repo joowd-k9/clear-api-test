@@ -29,13 +29,21 @@ class Runner(ABC):
         """
 
 
-class SequentialRunner(Runner):
+class DefaultRunner(Runner):
     """Runs tasks sequentially in the same thread strategy."""
 
     def run(
         self, func: Callable[[Any], Any], inputs: Iterable[Any]
     ) -> list[dict[str, Any]]:
-        return [func(i) for i in inputs]
+        results = []
+        for i in inputs:
+            result = func(i)
+            results.append(result)
+            # Early termination: if any extraction fails, return only that error immediately
+            if not result.get("success", True):
+                return [result]  # Return only the error, stop immediately
+        # If we get here, all inputs succeeded
+        return results
 
 
 class ThreadRunner(Runner):
@@ -52,10 +60,31 @@ class ThreadRunner(Runner):
             future_to_index = {
                 executor.submit(func, i): idx for idx, i in enumerate(inputs)
             }
+
+            # Track completed futures to cancel remaining ones on failure
+            completed_futures = set()
+
             for future in as_completed(future_to_index):
                 idx = future_to_index[future]
-                results[idx] = future.result()
-        return [results[i] for i in sorted(results.keys())]
+                result = future.result()
+                results[idx] = result
+                completed_futures.add(future)
+
+                # Early termination: if any extraction fails, cancel remaining futures and return only that error
+                if not result.get("success", True):
+                    # Cancel all remaining futures
+                    for remaining_future in future_to_index:
+                        if remaining_future not in completed_futures:
+                            remaining_future.cancel()
+                    return [result]  # Return only the error, stop immediately
+
+        # Return results in order if all succeeded
+        input_list = list(inputs)
+        ordered_results = []
+        for i in range(len(input_list)):
+            if i in results:
+                ordered_results.append(results[i])
+        return ordered_results
 
 
 class ProcessRunner(Runner):
@@ -72,7 +101,28 @@ class ProcessRunner(Runner):
             future_to_index = {
                 executor.submit(func, i): idx for idx, i in enumerate(inputs)
             }
+
+            # Track completed futures to cancel remaining ones on failure
+            completed_futures = set()
+
             for future in as_completed(future_to_index):
                 idx = future_to_index[future]
-                results[idx] = future.result()
-        return [results[i] for i in sorted(results.keys())]
+                result = future.result()
+                results[idx] = result
+                completed_futures.add(future)
+
+                # Early termination: if any extraction fails, cancel remaining futures and return only that error
+                if not result.get("success", True):
+                    # Cancel all remaining futures
+                    for remaining_future in future_to_index:
+                        if remaining_future not in completed_futures:
+                            remaining_future.cancel()
+                    return [result]  # Return only the error, stop immediately
+
+        # Return results in order if all succeeded
+        input_list = list(inputs)
+        ordered_results = []
+        for i in range(len(input_list)):
+            if i in results:
+                ordered_results.append(results[i])
+        return ordered_results

@@ -3,7 +3,7 @@ Base processor module providing abstract base class for document processing.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, final
+from typing import Any, Callable, final
 import logging
 from datetime import datetime
 import uuid
@@ -17,7 +17,7 @@ from processing_engine.models.execution import (
 from processing_engine.exceptions.execution import PrevalidationError
 from processing_engine.processors.runners import (
     Runner,
-    SequentialRunner,
+    DefaultRunner,
 )
 
 
@@ -39,7 +39,7 @@ class BaseProcessor(ABC):
 
         runner: The technique to use for the processor execution (sequential, threaded, process)
 
-        run_id: The id of the current run
+        execution_id: The id of the current run
         account_id: The id of the account the processor is running for
         underwriting_id: The id of the underwriting the processor is running for
         context: The context of the current run
@@ -49,7 +49,7 @@ class BaseProcessor(ABC):
     PROCESSOR_NAME: str
     runner: Runner
 
-    run_id: str
+    execution_id: str
     account_id: str
     underwriting_id: str
     _cost_tracker: list[CostEntry]
@@ -58,7 +58,7 @@ class BaseProcessor(ABC):
         self,
         account_id: str,
         underwriting_id: str,
-        runner: Runner = SequentialRunner(),
+        runner: Runner = DefaultRunner(),
     ):
         """
         Initialize the processor with underwriting ID
@@ -81,98 +81,6 @@ class BaseProcessor(ABC):
         """
         return f"p_{self.PROCESSOR_NAME}"
 
-    def base_cost(self) -> float:
-        """
-        Get the base cost of the processor.
-        """
-        return 0.0
-
-    def track_cost(
-        self, 
-        service: str, 
-        operation: str, 
-        cost: float, 
-        metadata: dict[str, Any] | None = None
-    ) -> None:
-        """
-        Track a cost entry for API calls or processing activities.
-        
-        Args:
-            service: The service name (e.g., 'experian', 'clear', 'ocr')
-            operation: The operation performed (e.g., 'credit_report', 'business_search')
-            cost: The cost of the operation
-            metadata: Additional metadata about the operation
-        """
-        entry = CostEntry(
-            service=service,
-            operation=operation,
-            cost=cost,
-            metadata=metadata or {}
-        )
-        self._cost_tracker.append(entry)
-        
-        self.logger.debug(
-            f"Cost tracked: {service}.{operation} = ${cost:.4f}",
-            extra={
-                "run_id": getattr(self, "run_id", None),
-                "account_id": self.account_id,
-                "underwriting_id": self.underwriting_id,
-                "service": service,
-                "operation": operation,
-                "cost": cost,
-                "metadata": metadata
-            }
-        )
-
-    def get_total_cost(self) -> float:
-        """
-        Calculate the total cost including base cost and tracked costs.
-        
-        Returns:
-            Total cost for this processor execution
-        """
-        tracked_cost = sum(entry.cost for entry in self._cost_tracker)
-        return self.base_cost() + tracked_cost
-
-    def get_cost_breakdown(self) -> dict[str, Any]:
-        """
-        Get detailed cost breakdown.
-        
-        Returns:
-            Dictionary with cost breakdown by service and operation
-        """
-        breakdown = {
-            "base_cost": self.base_cost(),
-            "tracked_costs": {},
-            "total_tracked": 0.0,
-            "total_cost": 0.0
-        }
-        
-        # Group costs by service and operation
-        for entry in self._cost_tracker:
-            if entry.service not in breakdown["tracked_costs"]:
-                breakdown["tracked_costs"][entry.service] = {}
-            
-            if entry.operation not in breakdown["tracked_costs"][entry.service]:
-                breakdown["tracked_costs"][entry.service][entry.operation] = {
-                    "count": 0,
-                    "total_cost": 0.0,
-                    "entries": []
-                }
-            
-            service_op = breakdown["tracked_costs"][entry.service][entry.operation]
-            service_op["count"] += 1
-            service_op["total_cost"] += entry.cost
-            service_op["entries"].append({
-                "cost": entry.cost,
-                "timestamp": entry.timestamp.isoformat(),
-                "metadata": entry.metadata
-            })
-        
-        breakdown["total_tracked"] = sum(entry.cost for entry in self._cost_tracker)
-        breakdown["total_cost"] = self.get_total_cost()
-        
-        return breakdown
 
     @final
     def execute(
@@ -193,90 +101,98 @@ class BaseProcessor(ABC):
             ProcessorExecutionError: If the processor execution fails
         """
         exceptions: tuple[Exception, ...] = (Exception,)
-        self.run_id: str = str(uuid.uuid4())
+        self.execution_id: str = str(uuid.uuid4())
         if context is not None:
-            # Update context with the provided context's attributes
             for key, value in context.__dict__.items():
                 setattr(self.context, key, value)
 
-        data = self._prevalidate_inputs(data)
+        preprocessing = [
+            ("prevalidation", self._prevalidate_inputs),
+            ("transformation", self._transform_input),
+            ("validation", self._validate_input),
+        ]
 
-        pipeline = [
-            ("validation", self._validate),
-            ("processing", self._process),
-            ("extraction", self._extract),
+        processing = [
+            ("extraction", self._extract_factors),
+        ]
+
+        postprocessing = [
+            ("aggregation", self._aggregate_results),
+            ("postvalidation", self._validate_result),
         ]
 
         init = datetime.now()
 
-        def run(input_id: str, input_data: Any) -> dict[str, Any]:
+        def run(data: Any, pipeline: list[tuple[str, Callable]]) -> dict[str, Any]:
             """
-            Run the pipeline for a single input.
+            Run a pipeline for the given data.
 
             Args:
-                input_id: The id of the input being processed
-                input_data: The raw input data
+                data: The input data
+                pipeline: List of (step_name, function) tuples to execute
 
             Returns:
-                A dict containing success, step, exception, message, payload or error details
+                A dict containing success, step, exception, message or error details
             """
-            item = data[input_id]
-            current = input_data
-            start = 0
+            current = data
 
-            if item.payload is not None and isinstance(item.payload, dict):
-                current = item.payload.get("data", input_data)
-                failed_step = item.payload.get("step")
-                if failed_step:
-                    for i, (step_name, _) in enumerate(pipeline):
-                        if step_name == failed_step:
-                            start = i
-                            break
-
-            for i, (step, function) in enumerate(pipeline):
-                if i < start:
-                    continue
+            for step, function in pipeline:
                 try:
                     current = function(current)
                 except exceptions as error:
-                    message = self._handle_error(error, step, input_id)
+                    message = self._handle_error(error, step)
                     return {
-                        "input_id": input_id,
                         "success": False,
                         "step": step,
                         "exception": error.__class__.__name__,
                         "message": message,
-                        "payload": current,
                     }
             return {
-                "input_id": input_id,
                 "success": True,
                 "output": current,
             }
 
-        def payloads(results: list[dict[str, Any]]) -> list[ProcessorInput]:
-            """
-            Extract the payloads from the results, including step information for retry scenarios.
-            """
-            return [
-                ProcessorInput(
-                    input_id=result["input_id"],
-                    account_id=self.account_id,
-                    underwriting_id=self.underwriting_id,
-                    data=data[result["input_id"]].data,
-                    payload={
-                        "step": result.get("step"),
-                        "exception": result.get("exception"),
-                        "message": result.get("message"),
-                        "data": result.get("payload"),
-                    } if not result["success"] else None,
-                )
-                for result in results
-                if result["input_id"] in data
-            ]
+        pre_result = run(data, preprocessing)
+        if not pre_result["success"]:
+            return ProcessingResult(
+                execution_id=self.execution_id,
+                account_id=self.account_id,
+                underwriting_id=self.underwriting_id,
+                success=False,
+                output=None,
+                error=pre_result,
+                context=self.context,
+                timestamp=datetime.now(),
+                duration=(datetime.now() - init).total_seconds(),
+            )
 
-        results = self.runner.run(lambda i: run(i.input_id, i.data), data.values())
-        success = all(r["success"] for r in results)
+        results = self.runner.run(lambda data: run(data, processing), pre_result["output"])
+        if not all(r["success"] for r in results):
+            return ProcessingResult(
+                execution_id=self.execution_id,
+                account_id=self.account_id,
+                underwriting_id=self.underwriting_id,
+                success=False,
+                output=None,
+                error=next(r for r in results if not r["success"]),
+                context=self.context,
+                timestamp=init,
+                duration=int((datetime.now() - init).total_seconds() * 1000),
+            )
+
+        post_result = run(results, postprocessing)
+        if not post_result["success"]:
+            return ProcessingResult(
+                execution_id=self.execution_id,
+                account_id=self.account_id,
+                underwriting_id=self.underwriting_id,
+                success=False,
+                output=None,
+                error=post_result,
+                context=self.context,
+                timestamp=init,
+                duration=int((datetime.now() - init).total_seconds() * 1000),
+            )
 
         # Calculate costs after processing is complete
         cost_breakdown = self._calculate_cost(ProcessingResult(
@@ -292,20 +208,17 @@ class BaseProcessor(ABC):
         ))
 
         return ProcessingResult(
-            run_id=self.run_id,
+            execution_id=self.execution_id,
             account_id=self.account_id,
             underwriting_id=self.underwriting_id,
-            success=success,
-            output=self._aggregate_results(results) if success else results,
+            success=True,
+            output=post_result["output"],
             context=self.context,
             timestamp=init,
             duration=int((datetime.now() - init).total_seconds() * 1000),
-            payloads=payloads(results) if not success else None,
-            cost_breakdown=cost_breakdown,
         )
 
-    @abstractmethod
-    def _validate(self, data: Any) -> Any:
+    def _validate_input(self, data: Any) -> Any:
         """
         Validate the input data.
 
@@ -320,24 +233,41 @@ class BaseProcessor(ABC):
         Raises:
             ValidationError: If the input data is not valid
         """
+        return data
 
-    @abstractmethod
-    def _process(self, data: Any) -> Any:
+    def _validate_result(self, data: Any) -> Any:
         """
-        Process the input data from the validated data.
+        Validate the result data.
 
-        This is the step where the main processing logic is implemented transforming
-        the validated raw data into a new processed form ready for extraction.
+        This method is used to validate the result data after processing.
 
         Args:
-            data: The validated data to process from
+            data: The result data to validate
 
         Returns:
-            The processed data
+            The validated result data
+
+        Raises:
+            ValidationError: If the result data is not valid
         """
+        return data
+
+    def _transform_input(self, data: Any) -> Any:
+        """
+        Transform the input data.
+
+        This method is used to transform the input data for processing.
+
+        Args:
+            data: The input data to transform
+
+        Returns:
+            The transformed data
+        """
+        return data
 
     @abstractmethod
-    def _extract(self, data: Any) -> dict[str, str | list | dict]:
+    def _extract_factors(self, data: Any) -> dict[str, str | list | dict]:
         """
         Extract the factors from the processed data.
 
@@ -367,7 +297,7 @@ class BaseProcessor(ABC):
 
     def _prevalidate_inputs(
         self, data: list[ProcessorInput]
-    ) -> dict[str, ProcessorInput]:
+    ) -> list[Any]:
         """
         Prevalidate the input data to ensure it is for the same account and underwriting.
 
@@ -375,17 +305,15 @@ class BaseProcessor(ABC):
             data: The input data to prevalidate
 
         Returns:
-            Dictionary of unique prevalidated data with input_id as key
+            List of prevalidated data values
 
         Raises:
             PrevalidationError: If the input data is not for the same account or underwriting
         """
-        unique_data = {item.input_id: item for item in data}
-
-        if any(input.account_id != self.account_id for input in unique_data.values()):
+        if any(input.account_id != self.account_id for input in data):
             raise PrevalidationError(
                 message="Input data is not for the same account",
-                run_id=getattr(self, "run_id", None),
+                execution_id=getattr(self, "execution_id", None),
                 account_id=self.account_id,
                 underwriting_id=self.underwriting_id,
                 processor_name=self.PROCESSOR_NAME,
@@ -393,17 +321,18 @@ class BaseProcessor(ABC):
 
         if any(
             input.underwriting_id != self.underwriting_id
-            for input in unique_data.values()
+            for input in data
         ):
             raise PrevalidationError(
                 message="Input data is not for the same underwriting",
-                run_id=getattr(self, "run_id", None),
+                execution_id=getattr(self, "execution_id", None),
                 account_id=self.account_id,
                 underwriting_id=self.underwriting_id,
                 processor_name=self.PROCESSOR_NAME,
             )
 
-        return unique_data
+        return [item.data for item in data]
+
 
     def _calculate_cost(self, result: ProcessingResult) -> dict[str, float|dict]:
         """
@@ -430,7 +359,7 @@ class BaseProcessor(ABC):
         return {k: v for r in results for k, v in r["output"].items()}
 
     def _handle_error(
-        self, error: Exception, action: str, input_id: str | None = None
+        self, error: Exception, action: str
     ) -> str:
         """
         Handle an error.
@@ -438,10 +367,9 @@ class BaseProcessor(ABC):
         self.logger.error(
             "Processor failed",
             extra={
-                "run_id": self.run_id,
+                "execution_id": self.execution_id,
                 "account_id": self.account_id,
                 "underwriting_id": self.underwriting_id,
-                "input_id": input_id,
                 "processor": self.PROCESSOR_NAME,
                 "step": action,
                 "error": str(error),
@@ -452,6 +380,6 @@ class BaseProcessor(ABC):
 
         return (
             f"Error in {self.PROCESSOR_NAME} processor "
-            f"(run_id: {self.run_id}, account_id: {self.account_id}, "
+            f"(execution_id: {self.execution_id}, account_id: {self.account_id}, "
             f"underwriting_id: {self.underwriting_id}, step: {action}): \n {error}"
         )

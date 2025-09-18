@@ -1,0 +1,52 @@
+AURA PROCESSING ENGINE - EXECUTION PIPELINE SUMMARY
+====================================================
+
+WHAT IT IS:
+A smart execution framework that processes underwriting data through a standardized 3-step pipeline (validate → process → extract) with configurable execution strategies and intelligent retry mechanisms.
+
+HOW IT WORKS:
+1. Takes a list of inputs (documents, data, etc.)
+2. Runs each through the same 3-step pipeline
+3. Uses one of three execution strategies (sequential, threaded, or process-based)
+4. Handles failures intelligently by resuming from the exact failure point
+5. Tracks costs for every operation and optimizes through caching
+
+KEY INNOVATIONS:
+
+SMART ERROR RETRY SYSTEM:
+- If validation fails → retry from validation
+- If processing fails → skip validation, retry from processing
+- If extraction fails → skip validation & processing, retry from extraction
+- No wasted work on retries
+
+EXECUTION STRATEGIES:
+- Sequential: One at a time (good for debugging)
+- Threaded: Concurrent I/O operations (good for API calls)
+- Process: True parallel processing (good for heavy calculations)
+
+INTEGRATION POINTS:
+- Receives documents from Data Collection team
+- Sends extracted factors to AI Decision team
+- Publishes events to Workflow Orchestration team
+- Stores results in Data Infrastructure systems
+
+PERFORMANCE TARGETS:
+- 95%+ success rate
+- 90% cost reduction through caching
+- 80% reduction in manual processing time
+- Complete audit trail for all operations
+
+BUSINESS IMPACT:
+- Automates manual underwriting data processing
+- Provides accurate cost tracking for billing
+- Enables intelligent retry without wasted work
+- Scales from simple to complex processing scenarios
+
+TECHNICAL HIGHLIGHTS:
+- 13 different processor types implemented
+- External API integrations with rate limiting
+- Comprehensive error handling and recovery
+- Real-time monitoring and cost optimization
+- Event-driven architecture for loose coupling
+
+This system transforms raw underwriting data into standardized, validated factors that feed into AI decision-making, while providing complete cost visibility and operational efficiency.

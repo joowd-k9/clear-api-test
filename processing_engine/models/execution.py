@@ -24,10 +24,10 @@ from typing import Any, Literal
 class CostEntry:
     """
     Represents a single cost entry for tracking API calls or processing activities.
-    
+
     This class is used by processors to track costs incurred during execution,
     particularly for external API calls that have per-call charges.
-    
+
     Attributes:
         service: The service name (e.g., 'experian', 'clear', 'ocr')
         operation: The operation performed (e.g., 'credit_report', 'business_search')
@@ -102,7 +102,7 @@ class ProcessingResult:
     Processor's execution output.
 
     Attributes:
-        run_id: The id of the current run
+        execution_id: The id of the current run
         account_id: The id of the account the processor is running for
         underwriting_id: The id of the underwriting the processor is running for
         output: The output of the processor
@@ -115,7 +115,7 @@ class ProcessingResult:
         cost_breakdown: Detailed cost breakdown for the processor execution
     """
 
-    run_id: str
+    execution_id: str
     account_id: str
     underwriting_id: str
     output: list[dict[str, str]]

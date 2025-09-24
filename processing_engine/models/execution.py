@@ -21,6 +21,28 @@ from typing import Any, Literal
 
 
 @dataclass
+class CostEntry:
+    """
+    Represents a single cost entry for tracking API calls or processing activities.
+    
+    This class is used by processors to track costs incurred during execution,
+    particularly for external API calls that have per-call charges.
+    
+    Attributes:
+        service: The service name (e.g., 'experian', 'clear', 'ocr')
+        operation: The operation performed (e.g., 'credit_report', 'business_search')
+        cost: The cost of the operation
+        metadata: Additional metadata about the operation
+        timestamp: When the cost was incurred
+    """
+    service: str
+    operation: str
+    cost: float
+    metadata: dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
 class ProcessorInput:
     """
     Processor input data.
@@ -90,6 +112,7 @@ class ProcessingResult:
         duration: The duration of the processor execution
         error: The error of the processor execution
         payloads: The payloads of the processor execution if the processor failed
+        cost_breakdown: Detailed cost breakdown for the processor execution
     """
 
     run_id: str
@@ -102,3 +125,4 @@ class ProcessingResult:
     duration: int = 0
     error: dict[str, str] | None = None
     payloads: list[ProcessorInput | dict[str, str]] | None = None
+    cost_breakdown: dict[str, Any] | None = None

@@ -47,6 +47,7 @@ class BaseProcessor(ABC):
     """
 
     PROCESSOR_NAME: str
+    PROCESSOR_PREREQUISITES: tuple[str, ...] = ()
     runner: Runner
 
     execution_id: str
@@ -193,19 +194,6 @@ class BaseProcessor(ABC):
                 timestamp=init,
                 duration=int((datetime.now() - init).total_seconds() * 1000),
             )
-
-        # Calculate costs after processing is complete
-        cost_breakdown = self._calculate_cost(ProcessingResult(
-            run_id=self.run_id,
-            account_id=self.account_id,
-            underwriting_id=self.underwriting_id,
-            success=success,
-            output=self._aggregate_results(results) if success else results,
-            context=self.context,
-            timestamp=init,
-            duration=int((datetime.now() - init).total_seconds() * 1000),
-            payloads=payloads(results) if not success else None,
-        ))
 
         return ProcessingResult(
             execution_id=self.execution_id,
@@ -357,6 +345,8 @@ class BaseProcessor(ABC):
             The aggregated results
         """
         return {k: v for r in results for k, v in r["output"].items()}
+
+
 
     def _handle_error(
         self, error: Exception, action: str

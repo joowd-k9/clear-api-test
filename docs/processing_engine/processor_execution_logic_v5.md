@@ -24,6 +24,35 @@ The processor execution system provides:
 3. **`ProcessorInput`**: Individual input items with unique identifiers
 4. **`ProcessingResult`**: Execution outcome with detailed error information and cost data
 
+### Base Processor Class - Key Responsibilities
+
+- Emit lifecycle events (`{processor}.execution.started|completed|failed`) to Pub/Sub
+- Determine eligibility to execute (check triggers against input; skip if not satisfied)
+- Input prevalidation checking if document is of correct type and exists
+- Execute the 3‑phase pipeline (pre‑extraction, extraction, post‑extraction)
+- Coordinate the pipeline and enforce atomic success/failure semantics
+- Summarize processing cost
+- Handle errors consistently
+- Persistence:
+    - inserting `processing_execution` record
+    - inserting and overwriting `factors` records
+    - optionally updating `application fields` when necessary
+
+### Concrete Processor Subclass - Key Responsibilities
+
+- Define `PROCESSOR_NAME` and any `PROCESSOR_TRIGGERS`
+- Transform input data when needed
+    - document splicing
+    - chunking large payloads
+    - normalization
+- Validate transformed data and inputs for processor-specific requirements
+- Implement extraction logic to produce factors from validated inputs
+- Aggregate and validate outputs
+   - map to canonical factor keys
+   - optionally populate application fields
+- Track processing costs as applicable
+   - (per execution, per page, or per api call)
+
 ---
 
 ## 2) Event Dispatching
@@ -42,7 +71,7 @@ class BaseProcessor:
 	    self,
 	    data: dict[str, Any],
 	    event: str,
-	    target: list[str]|str = 'websocket'
+	    target: list[str]|str = 'pubsub'
 	  ) -> None:
         """
         Emit events to specified system layer.
@@ -52,6 +81,7 @@ class BaseProcessor:
             event: Event name
             target: Target layer
         """
+
 ```
 
 ### Event Target Layers
@@ -66,11 +96,11 @@ The `target` parameter allows events to be routed to different system layers:
 
 **Handled by the base class** - no implementation required. These events are automatically sent to both `PubSub` and `WebSocket` layers:
 
-| Event | Description | Trigger | Target | Needed |
-| --- | --- | --- | --- | --- |
-| `{p_id}.execution.started`  | Processor execution started | At the start of execution | `pubsub`  | ( ? ) |
-| `{p_id}.execution.completed` | Processor execution succeeds | After successful completion of all phases | `pubsub` | ( ✓ ) |
-| `{p_id}.execution.failed` | Processor execution fails | On any phase failure | `pubsub`  | ( ✓ ) |
+| Event | Description | Trigger | Target |
+| --- | --- | --- | --- |
+| `{p_id}.execution.started` | Processor execution started | At the start of execution | `pubsub` |
+| `{p_id}.execution.completed` | Processor execution succeeds | After successful completion of all phases | `pubsub` |
+| `{p_id}.execution.failed` | Processor execution fails | On any phase failure | `pubsub` |
 
 **Event Flow**:
 
@@ -105,6 +135,7 @@ class BaseProcessor:
             cost: Cost amount to add to the total
         """
         self._total_cost += cost
+
 ```
 
 ### Cost Calculation Flow
@@ -124,6 +155,7 @@ self._add_cost(0.02)  # self._total_cost becomes 0.17
 
 # Access total cost directly
 total_cost = self._total_cost  # Returns 0.17
+
 ```
 
 ---
@@ -144,6 +176,7 @@ The processor has a 3-phase execution structure with runners handling the extrac
 
 ```
 pre-extraction phase → [extraction phase] → post-extraction phase
+
 ```
 
 ### Execution Phases
@@ -159,12 +192,10 @@ pre-extraction phase → [extraction phase] → post-extraction phase
 ### Pre-extraction Phase
 
 - **Input Pre-validation**:
-    - Checks if prerequisite documents exists
-    - Checks for `account_id` and `underwriting_id`
-    - Returns validated `ProcessorInput`'s data
+    - Checks if prerequisite documents exists or triggers are satisfied
+    - Check if stipulation is of correct type
 - **Input Transformation**: Transform and normalize input data before validation
 - **Input Validation**: Input validation and structure verification
-- **Input Validation Check**: If any input fails validation, the entire execution fails immediately
 
 ```mermaid
 graph TD
@@ -175,6 +206,7 @@ graph TD
     P3 -->|Any invalid| P5[FAIL - Return Error]
     P4 --> P6[End Pre-extraction]
     P5 --> P6
+
 ```
 
 ### Extraction Phase
@@ -191,12 +223,14 @@ graph TD
     E2 -->|No| E4[FAIL - Return Error]
     E3 --> E5[End Extraction]
     E4 --> E5
+
 ```
 
 ### Post-extraction Phase
 
 - **Result Aggregation**: Merges the output factors from each input into a single result set
 - **Result Validation**: Ensures all results are consistent and complete
+- **Database Persistence**: Store execution record and factors in the operational DB
 - **Complete Success**: Only returns success if all phases completed successfully
 
 ```mermaid
@@ -204,10 +238,12 @@ graph TD
     S0[Start Post-extraction] --> S1[Aggregate Results]
     S1 --> S2[Final Validation]
     S2 --> S3{Results Valid?}
-    S3 -->|Yes| S4[SUCCESS - Return Results]
-    S3 -->|No| S5[FAIL - Return Error]
-    S4 --> S6[End Post-extraction]
-    S5 --> S6
+    S3 -->|Yes| S4[Persist to Database]
+    S3 -->|No| S6[FAIL - Return Error]
+    S4 --> S5[SUCCESS - Return Results]
+    S5 --> S7[End Post-extraction]
+    S6 --> S7
+
 ```
 
 ### Execution Flow
@@ -218,6 +254,7 @@ graph TD
     B --> C[Extraction Phase]
     C --> D[Post-extraction Phase]
     D --> E[End]
+
 ```
 
 The processor execution follows these linear steps:
@@ -233,8 +270,9 @@ The processor execution follows these linear steps:
 9. **Aggregate Results** - Merge output factors from all inputs
 10. **Result Validation** - Ensure aggregated results are consistent
 11. **Check: Results Valid?** - Result validation before success
-12. **Return Processing Result** - Return result with aggregated output or error
-13. **End** - Processing complete
+12. **Persist Results** - Save execution record and factors; optional application updates
+13. **Return Processing Result** - Return result with aggregated output or error
+14. **End** - Processing complete
 
 ### Input Processing Strategy
 
@@ -287,7 +325,18 @@ Result: FAILED - Pre-extraction phase input validation error
 
 ---
 
-## 5) Concurrent Processing
+## 5) Database Persistence (Post-processing)
+
+### Persistence steps
+
+1. Insert `processing_execution` with `status`, timestamps (`started_at`/`completed_at`), `duration`, `processor_name`, and `run_cost_cents`.
+2. Upsert factors: for each `factor_key`, set previous `is_current = FALSE` and insert a new `factor` row with `value`, optional `unit`, `source = 'processor'`, and `execution_id`.
+3. Optionally update application fields (e.g., `merchant.industry`) when confidently derived.
+4. Commit the transaction; on error, rollback and mark the execution as `failed`.
+
+---
+
+## 6) Concurrent Processing
 
 The `BaseProcessor` provides configurable concurrent processing options for multiple inputs, allowing developers to choose between sequential and parallel execution strategies.
 
@@ -302,6 +351,7 @@ class Runner(ABC):
         inputs: Iterable[Any],
     ) -> list[dict[str, Any]]:
         """Execute function against inputs and return ordered results."""
+
 ```
 
 ### Available Processing Strategies
@@ -314,6 +364,7 @@ class Runner(ABC):
 ```python
 runner = DefaultRunner()
 results = runner.run(process_func, inputs)
+
 ```
 
 ### 2. `ThreadRunner`
@@ -324,18 +375,19 @@ results = runner.run(process_func, inputs)
 ```python
 runner = ThreadRunner(max_workers=4)
 results = runner.run(process_func, inputs)
+
 ```
 
 ### Concurrent Processing Configuration
 
-Configure the `BaseProcessor`'s concurrent processing behaviour based on your processing requirements:
+Configure the `BaseProcessor`'s concurrent processing behavior based on your processing requirements:
 
 - **`DefaultRunner`**: Sequential processing (for simple operations)
 - **`ThreadRunner`**: Concurrent processing (multiple inputs in parallel)
 
 ---
 
-## 6) Error Handling
+## 7) Error Handling
 
 ### Processor Execution Exception Types
 
@@ -362,3 +414,5 @@ The system throws specific exceptions for different processor execution phases a
 **Failure Behavior**
 
 All failures result in complete execution failure will immediately the stop execution at first failure point.
+
+---

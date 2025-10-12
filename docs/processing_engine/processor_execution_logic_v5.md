@@ -2,7 +2,7 @@
 
 **Applies to:** `BaseProcessor` abstract class and all implementing processor subclasses.
 
-**Purpose:** Define how a processor run is executed with configurable execution strategies and comprehensive error handling.
+**Purpose:** Define how a processor run is executed with clear separation between execution outputs and factor consolidation, standardized 3-phase pipeline, and comprehensive error handling.
 
 > ⚠️ NOTE: This document covers only the core execution engine for individual processors. It does NOT include orchestration, manual triggers, external API handling logic, or factor management systems.
 >
@@ -13,7 +13,7 @@
 
 ## Base Processor Class
 
-- Emit lifecycle events (`prcessors.execution.started|completed|failed`) to Pub/Sub
+- Emit lifecycle events (`processors.execution.started|completed|failed`) to Pub/Sub
 - Determine eligibility to execute (check triggers against input; skip if not satisfied)
 - Input prevalidation checking if document is of correct type and exists
 - Execute the 3‑phase pipeline
@@ -24,9 +24,9 @@
 - Summarize processing cost
 - Error handling
 - Data Persistence
-    - inserting `processing_execution` record
-    - inserting and overwriting `factors` records
-    - optionally updating `application fields` when necessary
+    - insert `processing_execution` record with structured execution output
+    - link `document_revision_ids` and `document_ids_hash`
+    - set `updated_execution_id` when superseding a previous execution
 
 ## Concrete Processor Subclass
 
@@ -37,24 +37,107 @@
     - normalization
     - pulling supplementary data from db
 - Validate transformed data and inputs for processor-specific requirements
-- Implement extraction logic to produce factors from validated inputs
-- Aggregate and validate outputs
-    - map to canonical factor keys
-    - optionally populate application fields
+- Implement extraction logic to produce execution outputs from validated inputs
+- Validate extraction outputs specific to the processor
 - Track processing costs as applicable
     - (per execution, per page, or per api call)
 - Raise domain specific exceptions on failure
     - `InputValidationError`
     - `DataTransformationError`
     - `FactorExtractionError`
-    - `ResultAggregationError`
     - `ResultValidationError`
     - `ApiError`
     - etcetera
 
 ---
 
-# 2) Event Dispatching
+# 2) Processor Configuration
+
+## Overview
+
+Processors define constants for identification (`PROCESSOR_NAME`, `PROCESSOR_TRIGGERS`) and default configuration values (`CONFIG`) that can be overridden by tenant-specific settings stored in the database.
+
+## Configuration Constants
+
+### `PROCESSOR_NAME`
+
+Unique identifier for the processor.
+
+**Must define:** Yes
+
+```python
+class BankStatementProcessor(BaseProcessor):
+    PROCESSOR_NAME = "p_bank_statement_processor"
+```
+
+### `PROCESSOR_TRIGGERS`
+
+Defines what inputs trigger processor execution.
+
+**Must define:** Only if processor has trigger requirements
+
+```python
+class BankStatementProcessor(BaseProcessor):
+    PROCESSOR_TRIGGERS = {
+        "documents_list": ["s_bank_statement"]
+    }
+```
+
+### `CONFIG`
+
+Default configuration values for the processor.
+
+**Must define:** Only if processor has configurable behavior
+
+```python
+class BankStatementProcessor(BaseProcessor):
+    CONFIG = {
+        "minimum_document": 3,
+        "analysis_window_months": 6,
+        "nsf_threshold_amount": 35.00
+    }
+```
+
+## Configuration Resolution
+
+### `get_config()`
+
+Retrieves processor configuration with database override support.
+
+**Implementation:**
+
+```python
+class BaseProcessor:
+    @classmethod
+    def get_config(cls, purchased_processor: PurchasedProcessor) -> dict:
+        default_config = cls.CONFIG if hasattr(cls, 'CONFIG') else {}
+        db_config = purchased_processor.config or {}
+
+        return {**default_config, **db_config}
+```
+
+**Behavior:**
+- Start with processor's `CONFIG` constant (defaults)
+- Override with `purchased_processor.config` from database (tenant-specific)
+- Returns merged configuration dictionary
+
+**Example Usage:**
+
+```python
+class BankStatementProcessor(BaseProcessor):
+    CONFIG = {
+        "minimum_document": 3,
+        "analysis_window_months": 6
+    }
+
+purchased_processor.config = {"minimum_document": 6}
+
+effective_config = BankStatementProcessor.get_config(purchased_processor)
+```
+
+---
+
+# 3) Event Dispatching
 
 ## Overview
 
@@ -80,7 +163,6 @@ class BaseProcessor:
             event: Event name
             target: Target layer
         """
-
 ```
 
 ## Major Lifecycle Events
@@ -101,7 +183,7 @@ class BaseProcessor:
 
 ---
 
-# 3) Cost Tracking
+# 4) Cost Tracking
 
 ## Overview
 
@@ -126,7 +208,6 @@ class BaseProcessor:
             cost: Cost amount to add to the total
         """
         self._total_cost += cost
-
 ```
 
 ## Cost Calculation Flow
@@ -138,7 +219,182 @@ class BaseProcessor:
 
 ---
 
-# 4) Execution Pipeline
+# 5) Processor Methods
+
+## Overview
+
+Processors must implement specific methods to handle the execution pipeline and factor consolidation. The `BaseProcessor` provides default implementations for some methods, while others must be overridden by concrete processor subclasses.
+
+## Required Methods
+
+### `execute()`
+
+Main execution method that orchestrates the 3-phase pipeline.
+
+**Handled by:** Base class (no override needed)
+
+**Responsibilities:**
+- Coordinate pre-extraction, extraction, and post-extraction phases
+- Enforce atomic success/failure semantics
+- Emit lifecycle events
+- Handle errors and persist results
+
+### `prevalidate_input()`
+
+Pre-validates inputs before transformation.
+
+**Must override:** No
+
+**Purpose:** Check if required documents exist and are of correct type
+
+### `transform_input()`
+
+Transforms and normalizes input data.
+
+**Must override:** Yes
+
+**Purpose:** Convert raw inputs into standardized format for validation and extraction
+
+### `validate_input()`
+
+Validates transformed input data.
+
+**Must override:** Yes
+
+**Purpose:** Verify input structure and required fields are present
+
+### `extract()`
+
+Performs factor extraction from validated inputs.
+
+**Must override:** Yes
+
+**Purpose:** Extract factors and data from inputs (core processor logic)
+
+### `validate_output()`
+
+Validates extraction output.
+
+**Must override:** Yes
+
+**Purpose:** Ensure extracted output meets processor-specific requirements
+
+## Optional Methods
+
+### `consolidate()`
+
+Consolidates multiple executions into final factors for the processor.
+
+**Must override:** Only if processor has multiple executions (e.g., bank statements across multiple months)
+
+**Default behavior:** Returns the execution output from the single active execution without modification
+
+**Purpose:** Define how to consolidate multiple execution outputs into final factor values
+
+**When to override:**
+- Processor can have multiple executions for the same underwriting
+- Need to aggregate data across executions (e.g., average revenue across 6 months)
+- Need custom logic to combine execution results
+
+**Example - Default Implementation:**
+
+```python
+class BaseProcessor:
+    @staticmethod
+    def consolidate(executions: list[ProcessingExecution]) -> dict:
+        if not executions:
+            return {}
+
+        if len(executions) == 1:
+            return executions[0].output
+
+        return executions[-1].output
+```
+
+**Example - Bank Statement Processor Override:**
+
+```python
+class BankStatementProcessor(BaseProcessor):
+    @staticmethod
+    def consolidate(executions: list[ProcessingExecution]) -> dict:
+        if not executions:
+            return {}
+
+        monthly_revenues = [exec.output.get("monthly_revenue", 0) for exec in executions]
+        nsf_counts = [exec.output.get("nsf_count", 0) for exec in executions]
+
+        return {
+            "f_revenue_monthly_avg": sum(monthly_revenues) / len(monthly_revenues),
+            "f_revenue_monthly_min": min(monthly_revenues),
+            "f_revenue_monthly_max": max(monthly_revenues),
+            "f_nsf_total_count": sum(nsf_counts),
+            "f_months_analyzed": len(executions)
+        }
+```
+
+**Example - Credit Check Processor (Single Execution):**
+
+```python
+class CreditCheckProcessor(BaseProcessor):
+    pass
+```
+
+### `should_execute()`
+
+Determines if processor should execute based on additional business logic beyond trigger matching.
+
+**Must override:** Only if processor has custom eligibility rules
+
+**Default behavior:** Always returns `True` (processor executes if triggers match)
+
+**Purpose:** Add custom pre-execution checks (e.g., minimum document count, data quality requirements)
+
+**Example - Default Implementation:**
+
+```python
+class BaseProcessor:
+    @staticmethod
+    def should_execute(payload: dict) -> tuple[bool, str | None]:
+        return True, None
+```
+
+**Example - Bank Statement Processor Override:**
+
+```python
+class BankStatementProcessor(BaseProcessor):
+    @staticmethod
+    def should_execute(payload: dict) -> tuple[bool, str | None]:
+        documents = payload.get("documents_list", {}).get("s_bank_statement", [])
+
+        if len(documents) < 3:
+            return False, "Requires minimum 3 bank statements"
+
+        return True, None
+```
+
+**Notes:**
+
+- **Returns:** Tuple of (should_execute: bool, reason: str | None)
+- **Called Before Execution**: Checked after trigger matching but before creating execution
+- **Skip Reason**: If returns False, the reason is logged and no execution is created
+
+## Static Method Notes
+
+**For `consolidate()` method:**
+
+- **Called by Orchestrator**: Called during the consolidation phase, not during processor execution
+- **Active Executions Only**: Receives only active (non-superseded, non-failed) executions for the processor
+- **Processor-Specific Logic**: Each processor defines how to consolidate its own execution outputs
+
+**For `should_execute()` method:**
+
+- **Called by Orchestrator**: Checked after trigger matching but before creating execution
+- **Pre-execution Gate**: Additional business logic to determine execution eligibility
+- **Skip Logging**: Failed checks are logged with the provided reason
+
+---
+
+# 6) Execution Pipeline
 
 ## Core Principle: Atomic Execution
 
@@ -150,11 +406,10 @@ The processor execution framework implements atomic transaction semantics:
 
 ## Execution Flow
 
-The processor has a 3-phase execution structure with runners handling the extraction phase:
+The processor has a 3-phase execution structure:
 
 ```
 pre-extraction phase → [extraction phase] → post-extraction phase
-
 ```
 
 ## Execution Phases
@@ -162,8 +417,8 @@ pre-extraction phase → [extraction phase] → post-extraction phase
 | Phase | Description |
 | --- | --- |
 | **Pre-extraction Phase** | Input prevalidation, transformation, and input validation |
-| **Extraction Phase** | Extraction step (executed by runners) |
-| **Post-extraction Phase** | Result aggregation and result validation |
+| **Extraction Phase** | Factor extraction from validated inputs |
+| **Post-extraction Phase** | Result validation and persistence |
 
 ## Phase Responsibilities
 
@@ -177,50 +432,47 @@ pre-extraction phase → [extraction phase] → post-extraction phase
 
 ```mermaid
 graph TD
-    P0[Start Pre-extraction] --> P1[Prevalidate Input List]
-    P1 --> P2[Transform Input Data]
-    P2 --> P3[Validate All Inputs]
-    P3 -->|All valid| P4[Proceed to Extraction]
-    P3 -->|Any invalid| P5[FAIL - Return Error]
-    P4 --> P6[End Pre-extraction]
+    P0["Start Pre-extraction"] --> P1["Prevalidate Input List"]
+    P1 --> P2["Transform Input Data"]
+    P2 --> P3["Validate All Inputs"]
+    P3 -->|All valid| P4["Proceed to Extraction"]
+    P3 -->|Any invalid| P5["FAIL - Return Error"]
+    P4 --> P6["End Pre-extraction"]
     P5 --> P6
 
 ```
 
 ## Extraction Phase
 
-- **Extraction**: Factor extraction and result formatting
+- **Extraction**: Factor extraction and result formatting from validated inputs
 - **Complete Processing**: All inputs must succeed or the entire execution fails
-- **Runner Execution**: Parallel processing of validated inputs
 
 ```mermaid
 graph TD
-    E0[Start Extraction] --> E1[Runner Processes Each Input]
-    E1 --> E2{All Inputs Success?}
-    E2 -->|Yes| E3[Proceed to Post-extraction]
-    E2 -->|No| E4[FAIL - Return Error]
-    E3 --> E5[End Extraction]
+    E0["Start Extraction"] --> E1["Process Each Input (sequential by default)"]
+    E1 --> E2{"All Inputs Success?"}
+    E2 -->|Yes| E3["Proceed to Post-extraction"]
+    E2 -->|No| E4["FAIL - Return Error"]
+    E3 --> E5["End Extraction"]
     E4 --> E5
 
 ```
 
 ## Post-extraction Phase
 
-- **Result Aggregation**: Merges the output factors from each input into a single result set
-- **Result Validation**: Ensures all results are consistent and complete
-- **Database Persistence**: Store execution record and factors in the operational DB
+- **Result Validation**: Ensures extraction output is consistent and complete
+- **Database Persistence**: Store the `processing_execution` record with execution output only (no factor writes here)
 - **Complete Success**: Only returns success if all phases completed successfully
 
 ```mermaid
 graph TD
-    S0[Start Post-extraction] --> S1[Aggregate Results]
-    S1 --> S2[Validate Aggregated Results]
-    S2 --> S3{Results Valid?}
-    S3 -->|Yes| S4[Persist to Database]
-    S3 -->|No| S6[FAIL - Return Error]
-    S4 --> S5[SUCCESS - Return Results]
-    S5 --> S7[End Post-extraction]
-    S6 --> S7
+    S0["Start Post-extraction"] --> S1["Validate Execution Output"]
+    S1 --> S2{"Output Valid?"}
+    S2 -->|Yes| S3["Persist Execution Output"]
+    S2 -->|No| S4["FAIL - Return Error"]
+    S3 --> S5["SUCCESS - Return Results"]
+    S5 --> S6["End Post-extraction"]
+    S4 --> S6
 
 ```
 
@@ -228,10 +480,10 @@ graph TD
 
 ```mermaid
 graph TD
-    A[Start] --> B[Pre-extraction Phase]
-    B --> C[Extraction Phase]
-    C --> D[Post-extraction Phase]
-    D --> E[End]
+    A["Start"] --> B["Pre-extraction Phase"]
+    B --> C["Extraction Phase"]
+    C --> D["Post-extraction Phase"]
+    D --> E["End"]
 
 ```
 
@@ -243,13 +495,12 @@ The processor execution follows these linear steps:
     2. **Transform Input Data** - Transform and normalize input data before validation
     3. **Validate All Inputs** - Input validation and structure verification
     4. **Check: All Inputs Valid?** - If any input fails input validation, entire execution fails
-    5. **Runner Processes Each Input** - Execute factor extraction step on each input
+    5. **Process Each Input** - Execute factor extraction step on each input
     6. **Check: All Inputs Success?** - If any input fails, entire execution fails
-    7. **Aggregate Results** - Merge output factors from all inputs
-    8. **Result Validation** - Ensure aggregated results are consistent
-    9. **Check: Results Valid?** - Result validation before success
-    10. **Persist Results** - Save execution record and factors; optional application updates
-    11. **Return Processing Result** - Return result with aggregated output or error
+    7. **Validate Results** - Ensure extraction output is consistent and complete
+    8. **Check: Results Valid?** - Result validation before success
+    9. **Persist Execution Output** - Save execution record with output payload and links
+    10. **Return Processing Result** - Return result with execution output or error
 3. **End** - Processing complete
 
 ## Input Processing Strategy
@@ -258,132 +509,30 @@ The **3-Phase Execution** processes multiple input items as follows:
 
 1. **Input List**: The processor receives a list of input items (documents, records)
 2. **Pre-extraction Phase**: All inputs are pre-validated and input validated. **If any input fails, the entire execution fails immediately**
-3. **Extraction Phase**: The runner takes each validated input and applies the factor extraction function. **If any input fails, the entire execution fails**
-4. **Post-extraction Phase**: The `BaseProcessor` aggregates results and performs result validation. **If aggregation fails, the entire execution fails**
+3. **Extraction Phase**: Each validated input is processed through the factor extraction function. **If any input fails, the entire execution fails**
+4. **Post-extraction Phase**: The `BaseProcessor` validates the extraction output. **If validation fails, the entire execution fails**
 
 ---
 
-# 5) Database Persistence (Post-processing)
+# 7) Database Persistence (Post-processing)
 
 ## Persistence steps
 
-1. Insert `processing_execution` with `status`, timestamps (`started_at`/`completed_at`), `duration`, `processor_name`, and `run_cost_cents`.
-2. Upsert factors: for each `factor_key`, set previous `is_current = FALSE` and insert a new `factor` row with `value`, optional `unit`, `source = 'processor'`, and `execution_id`.
-3. Optionally update application fields (e.g., `merchant.industry`) when confidently derived.
+1. Insert `processing_execution` with `status`, timestamps (`started_at`/`completed_at`), `duration`, `processor_name`, `run_cost_cents`, and `output` (structured JSON output).
+2. Link documents: store `document_revision_ids` (array) and `document_ids_hash` (computed from base document IDs, not revision IDs).
+3. If this execution supersedes a prior one, set `updated_execution_id` on the prior execution to this execution's ID.
 4. Commit the transaction; on error, rollback and mark the execution as `failed`.
 
----
+Factors are NOT written during execution. Factor consolidation is performed by the orchestrator per-processor using only active executions.
 
-# 6) Concurrent Processing
+### Execution Output vs Factors
 
-The `BaseProcessor` provides configurable concurrent processing options for multiple inputs, allowing developers to choose between sequential and parallel execution strategies.
-
-## Available Processing Strategies
-
-### 1. `DefaultRunner`
-
-- **Strategy**: Sequential processing (one input at a time)
-- **Use Case**: Default for simple operations
-
-### 2. `ThreadRunner`
-
-- **Strategy**: Concurrent processing (multiple inputs in parallel)
-- **Use Case**: When you want faster processing through thread based parallelism
-
-## Example Use cases
-
-The following are example use cases of running concurrency.
-
-### CLEAR Person Search (Owner-level parallelism)
-
-This example demonstrates concurrent processing where each owner is processed in a separate thread.
-
-**High-level flow**
-
-1. Transform application data from orchestration into an owners list of two items
-2. Validate required fields (EIN format, ISO country code, name/DOB presence)
-3. Extraction (runner): For each owner, call CLEAR Person Search API and extract factors in parallel
-4. Aggregate the two result sets and validate the combined result
-5. Persist execution and factors, then update the document/application fields
-
-**Flowchart**
-
-```mermaid
-graph TD
-    A[Start] --> T1["Transform application → owners list (2)"]
-    T1 --> V1["Validate owner fields (EIN, country code, name, DOB)"]
-    V1 -->|All valid| X1[Extraction - ThreadRunner]
-    V1 -->|Invalid| F[FAIL]
-
-    subgraph ThreadRunner
-        direction LR
-        X1 --> OA[Owner A: call CLEAR Person Search, extract factors]
-        X1 --> OB[Owner B: call CLEAR Person Search, extract factors]
-    end
-
-    OA --> AGG[Aggregate owner results]
-    OB --> AGG
-    AGG --> RV[Validate aggregated results]
-    RV -->|Valid| P[Persist execution + factors, update document]
-    RV -->|Invalid| F
-    P --> S[SUCCESS]
-    S --> E[End]
-    F --> E
-
-```
-
-**Why threads here?**
-
-- Owner-level calls are independent I/O-bound API requests; `ThreadRunner` reduces wall-clock time by running them concurrently.
-
-### Bank Statements (Monthly chunk parallelism)
-
-This example demonstrates concurrent processing where each month-bucket of a bank statement is processed in parallel.
-
-**High-level flow**
-
-1. Transform the uploaded bank statement into monthly chunks (splice by statement period)
-2. Validate each chunk (dates align, pages complete, no duplicate transactions)
-3. Extraction (runner): Per month, compute credits/debits, NSF counts, average daily balance, volatility
-4. Aggregate across months (3/6/12-month averages, trend, seasonality)
-5. Persist execution and factors, then update document/application fields
-
-**Flowchart**
-
-```mermaid
-graph TD
-    A[Start] --> T1["Transform bank statement → split by month buckets"]
-    T1 --> V1["Validate each month chunk (dates, completeness, duplicates)"]
-    V1 -->|All valid| X1[Extraction - ThreadRunner]
-    V1 -->|Invalid| F[FAIL]
-
-    subgraph ThreadRunner
-        direction LR
-        X1 --> M1[Month 1: compute credits/debits, NSFs, avg daily balance]
-        X1 --> M2[Month 2: compute credits/debits, NSFs, avg daily balance]
-        X1 --> MN[Month N: compute credits/debits, NSFs, avg daily balance]
-    end
-
-    M1 --> AGG[Aggregate across months]
-    M2 --> AGG
-    MN --> AGG
-
-    AGG --> RV["Validate aggregated results (3/6/12-mo avg, trend, volatility)"]
-    RV -->|Valid| P[Persist execution + factors, update document]
-    RV -->|Invalid| F
-    P --> S[SUCCESS]
-    S --> E[End]
-    F --> E
-
-```
-
-**Why threads here?**
-
-- Month-level calculations are independent and I/O/CPU-light per chunk; `ThreadRunner` speeds up wall-clock time while maintaining atomic success semantics.
+- Execution Output: processor-specific extracted results persisted on the `processing_execution` record.
+- Factors: canonical factor keys derived in a separate consolidation phase by the orchestrator that reads active executions and writes to the `factors` table.
 
 ---
 
-# 7) Error Handling
+# 8) Error Handling
 
 ## Processor Execution Exception Types
 
@@ -402,7 +551,6 @@ The system throws specific exceptions for different processor execution phases a
 
 ## Post-extraction Phase Exceptions
 
-- **`ResultAggregationError`**: Result collection and aggregation failures
 - **`ResultValidationError`**: Result validation failures
 
 ## Error Handling
